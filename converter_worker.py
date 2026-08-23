@@ -5,7 +5,7 @@ import cv2
 import numpy as np
 from PIL import Image
 from ser_parser import SERParser
-from image_utils import apply_hsl_colorization, apply_logo_overlay, load_title_image
+from image_utils import apply_hsl_colorization, apply_logo_overlay, load_title_image, embed_audio_into_video
 
 class ConverterWorker(QThread):
     progress_changed = pyqtSignal(int)
@@ -35,7 +35,10 @@ class ConverterWorker(QThread):
                  intro_duration: float = 2.0,
                  outro_enabled: bool = False,
                  outro_path: Optional[str] = None,
-                 outro_duration: float = 2.0):
+                 outro_duration: float = 2.0,
+                 audio_enabled: bool = False,
+                 audio_path: Optional[str] = None,
+                 audio_loop: bool = True):
         super().__init__()
         self.ser_path = ser_path
         self.mp4_path = mp4_path
@@ -69,6 +72,10 @@ class ConverterWorker(QThread):
         self.outro_enabled = outro_enabled
         self.outro_path = outro_path
         self.outro_duration = outro_duration
+
+        self.audio_enabled = audio_enabled
+        self.audio_path = audio_path
+        self.audio_loop = audio_loop
 
         self._is_cancelled = False
 
@@ -264,7 +271,22 @@ class ConverterWorker(QThread):
             else:
                 writer.release()
                 writer = None
-                self.conversion_finished.emit(True, f"Conversione completata con successo usando il codec {chosen_codec_name}!")
+
+                # Audio soundtrack embedding step
+                if self.audio_enabled and self.audio_path and os.path.exists(self.audio_path):
+                    self.status_changed.emit("Incorporamento della colonna sonora audio nell'MP4 in corso...")
+                    mux_ok = embed_audio_into_video(
+                        video_path=self.mp4_path,
+                        audio_path=self.audio_path,
+                        output_path=self.mp4_path,
+                        loop=self.audio_loop
+                    )
+                    if mux_ok:
+                        self.conversion_finished.emit(True, "Conversione MP4 completata con successo con colonna sonora audio inclusa!")
+                    else:
+                        self.conversion_finished.emit(True, f"Conversione MP4 completata col codec {chosen_codec_name} (senza audio).")
+                else:
+                    self.conversion_finished.emit(True, f"Conversione completata con successo usando il codec {chosen_codec_name}!")
 
             parser.close()
             parser = None

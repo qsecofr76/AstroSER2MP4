@@ -193,3 +193,54 @@ def apply_logo_overlay(
         out_img[y:y+logo_target_h, x:x+logo_target_w] = roi_blended
 
     return out_img
+
+def embed_audio_into_video(video_path: str, audio_path: str, output_path: str, loop: bool = True) -> bool:
+    """
+    Uses imageio_ffmpeg (or ffmpeg binary) to embed an audio soundtrack track into an MP4 video file.
+    If loop is True, loops the audio track to match the exact duration of the video.
+    """
+    import subprocess
+    import imageio_ffmpeg
+
+    if not os.path.exists(video_path) or not os.path.exists(audio_path):
+        return False
+
+    try:
+        ffmpeg_exe = imageio_ffmpeg.get_ffmpeg_exe()
+        
+        temp_out = output_path + ".temp_mux.mp4"
+        if os.path.exists(temp_out):
+            try:
+                os.remove(temp_out)
+            except Exception:
+                pass
+
+        cmd = [
+            ffmpeg_exe, "-y"
+        ]
+        if loop:
+            cmd.extend(["-stream_loop", "-1"])
+        
+        cmd.extend([
+            "-i", video_path,
+            "-i", audio_path,
+            "-c:v", "copy",
+            "-c:a", "aac",
+            "-b:a", "192k",
+            "-shortest",
+            temp_out
+        ])
+
+        result = subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+        if result.returncode == 0 and os.path.exists(temp_out) and os.path.getsize(temp_out) > 0:
+            if os.path.exists(output_path):
+                os.remove(output_path)
+            os.rename(temp_out, output_path)
+            return True
+        else:
+            if os.path.exists(temp_out):
+                os.remove(temp_out)
+            return False
+    except Exception as e:
+        print(f"Error embedding audio: {e}")
+        return False
