@@ -87,8 +87,20 @@ class SERParser:
             datetime_local=datetime_local
         )
 
-        self._channels = 3 if color_id >= 100 else 1
         self._bytes_per_pixel = 1 if pixel_depth <= 8 else 2
+        single_frame_bytes_1chan = image_width * image_height * self._bytes_per_pixel
+        single_frame_bytes_3chan = single_frame_bytes_1chan * 3
+
+        if color_id >= 100:
+            self._channels = 3
+        else:
+            self._channels = 1
+            if frame_count > 0:
+                payload_size = self._file_size - self.HEADER_SIZE
+                min_3chan_bytes = single_frame_bytes_3chan * frame_count
+                if payload_size >= min_3chan_bytes:
+                    self._channels = 3
+
         self._frame_size_bytes = image_width * image_height * self._bytes_per_pixel * self._channels
 
         expected_size_with_timestamps = self.HEADER_SIZE + frame_count * self._frame_size_bytes + frame_count * 8
@@ -141,7 +153,7 @@ class SERParser:
             img = img.astype(np.uint16)
 
         cid = self.header.color_id
-        if color_mode_override != "AUTO":
+        if color_mode_override not in ["AUTO", "DISABLED", "NONE"]:
             mode_map = {
                 "MONO": 0,
                 "RGGB": 1,
@@ -153,57 +165,61 @@ class SERParser:
                 "RGB_PLANAR": 100
             }
             cid = mode_map.get(color_mode_override, cid)
+        elif color_mode_override in ["DISABLED", "NONE"] and cid < 100:
+            cid = 100
 
-        # Determine actual file channels from buffer size
         raw_elements = len(img)
         actual_channels = 3 if raw_elements == (w * h * 3) else 1
 
+        disable_debayer = (
+            actual_channels == 3 or 
+            color_mode_override in ["DISABLED", "NONE", "RGB", "RGB_PLANAR", "BGR"] or
+            cid >= 100
+        )
+
         if actual_channels == 3:
-            # File actually contains 3-channel RGB/BGR data
+            # File actually contains 3-channel RGB/BGR data (already debayered)
+            interleaved_img = img.reshape((h, w, 3))
+            
             if color_mode_override == "RGB_PLANAR":
                 planar_img = img.reshape((3, h, w))
                 if cid == 100:
                     bgr_raw = cv2.merge([planar_img[2], planar_img[1], planar_img[0]])
                 else:
                     bgr_raw = cv2.merge([planar_img[0], planar_img[1], planar_img[2]])
-            elif color_mode_override in ["RGGB", "BGGR", "GRBG", "GBRG", "MONO"]:
-                interleaved_img = img.reshape((h, w, 3))
+            elif color_mode_override == "MONO":
                 if self.header.color_id == 100:
                     bgr_temp = cv2.cvtColor(interleaved_img, cv2.COLOR_RGB2BGR)
                 else:
                     bgr_temp = interleaved_img
                 gray = cv2.cvtColor(bgr_temp, cv2.COLOR_BGR2GRAY)
-                
+                bgr_raw = cv2.cvtColor(gray, cv2.COLOR_GRAY2BGR)
+            else:
+                if cid == 100:
+                    bgr_raw = cv2.cvtColor(interleaved_img, cv2.COLOR_RGB2BGR)
+                elif cid == 101:
+                    bgr_raw = interleaved_img
+                else:
+                    # Default for 3-channel if cid < 100
+                    bgr_raw = cv2.cvtColor(interleaved_img, cv2.COLOR_RGB2BGR)
+        else:
+            # File actually contains 1-channel raw Bayer/Mono data (w * h)
+            gray = img.reshape((h, w))
+            
+            if disable_debayer or color_mode_override in ["DISABLED", "NONE", "MONO"] or cid == 0:
+                bgr_raw = cv2.cvtColor(gray, cv2.COLOR_GRAY2BGR)
+            else:
                 bayer_codes = {
                     1: cv2.COLOR_BayerRG2BGR_EA if debayer_algorithm == "EA" else (cv2.COLOR_BayerRG2BGR_VNG if debayer_algorithm == "VNG" else cv2.COLOR_BayerRG2BGR),
                     2: cv2.COLOR_BayerGR2BGR_EA if debayer_algorithm == "EA" else (cv2.COLOR_BayerGR2BGR_VNG if debayer_algorithm == "VNG" else cv2.COLOR_BayerGR2BGR),
                     3: cv2.COLOR_BayerGB2BGR_EA if debayer_algorithm == "EA" else (cv2.COLOR_BayerGB2BGR_VNG if debayer_algorithm == "VNG" else cv2.COLOR_BayerGB2BGR),
                     4: cv2.COLOR_BayerBG2BGR_EA if debayer_algorithm == "EA" else (cv2.COLOR_BayerBG2BGR_VNG if debayer_algorithm == "VNG" else cv2.COLOR_BayerBG2BGR),
                 }
+
                 if cid in bayer_codes:
                     bgr_raw = cv2.cvtColor(gray, bayer_codes[cid])
                 else:
                     bgr_raw = cv2.cvtColor(gray, cv2.COLOR_GRAY2BGR)
-            else:
-                interleaved_img = img.reshape((h, w, 3))
-                if cid == 100:
-                    bgr_raw = cv2.cvtColor(interleaved_img, cv2.COLOR_RGB2BGR)
-                else:
-                    bgr_raw = interleaved_img
-        else:
-            # File actually contains 1-channel raw Bayer/Mono data (w * h)
-            gray = img.reshape((h, w))
-            bayer_codes = {
-                1: cv2.COLOR_BayerRG2BGR_EA if debayer_algorithm == "EA" else (cv2.COLOR_BayerRG2BGR_VNG if debayer_algorithm == "VNG" else cv2.COLOR_BayerRG2BGR),
-                2: cv2.COLOR_BayerGR2BGR_EA if debayer_algorithm == "EA" else (cv2.COLOR_BayerGR2BGR_VNG if debayer_algorithm == "VNG" else cv2.COLOR_BayerGR2BGR),
-                3: cv2.COLOR_BayerGB2BGR_EA if debayer_algorithm == "EA" else (cv2.COLOR_BayerGB2BGR_VNG if debayer_algorithm == "VNG" else cv2.COLOR_BayerGB2BGR),
-                4: cv2.COLOR_BayerBG2BGR_EA if debayer_algorithm == "EA" else (cv2.COLOR_BayerBG2BGR_VNG if debayer_algorithm == "VNG" else cv2.COLOR_BayerBG2BGR),
-            }
-
-            if cid in bayer_codes:
-                bgr_raw = cv2.cvtColor(gray, bayer_codes[cid])
-            else:
-                bgr_raw = cv2.cvtColor(gray, cv2.COLOR_GRAY2BGR)
 
         # Handle 16-bit to 8-bit scaling and Auto-Stretch
         if self._bytes_per_pixel == 2:

@@ -1,9 +1,11 @@
 import os
+from typing import Optional
 from PyQt6.QtCore import QThread, pyqtSignal
 import cv2
 import numpy as np
 from PIL import Image
 from ser_parser import SERParser
+from image_utils import apply_hsl_colorization, apply_logo_overlay, load_title_image
 
 class ConverterWorker(QThread):
     progress_changed = pyqtSignal(int)
@@ -15,7 +17,25 @@ class ConverterWorker(QThread):
                  brightness: int = 0, gamma: float = 1.0,
                  color_mode_override: str = "AUTO",
                  debayer_algorithm: str = "EA",
-                 quality: int = 95):
+                 quality: int = 95,
+                 start_frame: int = 1,
+                 end_frame: Optional[int] = None,
+                 hsl_enabled: bool = False,
+                 hsl_preset: str = "Nessuno (Originale)",
+                 hsl_hue: int = 0,
+                 hsl_saturation: int = 100,
+                 hsl_luminance: int = 0,
+                 logo_enabled: bool = False,
+                 logo_path: Optional[str] = None,
+                 logo_position: str = "In Basso a Destra",
+                 logo_scale: int = 15,
+                 logo_opacity: int = 100,
+                 intro_enabled: bool = False,
+                 intro_path: Optional[str] = None,
+                 intro_duration: float = 2.0,
+                 outro_enabled: bool = False,
+                 outro_path: Optional[str] = None,
+                 outro_duration: float = 2.0):
         super().__init__()
         self.ser_path = ser_path
         self.mp4_path = mp4_path
@@ -27,6 +47,29 @@ class ConverterWorker(QThread):
         self.color_mode_override = color_mode_override
         self.debayer_algorithm = debayer_algorithm
         self.quality = quality
+        
+        self.start_frame = start_frame
+        self.end_frame = end_frame
+        
+        self.hsl_enabled = hsl_enabled
+        self.hsl_preset = hsl_preset
+        self.hsl_hue = hsl_hue
+        self.hsl_saturation = hsl_saturation
+        self.hsl_luminance = hsl_luminance
+
+        self.logo_enabled = logo_enabled
+        self.logo_path = logo_path
+        self.logo_position = logo_position
+        self.logo_scale = logo_scale
+        self.logo_opacity = logo_opacity
+
+        self.intro_enabled = intro_enabled
+        self.intro_path = intro_path
+        self.intro_duration = intro_duration
+        self.outro_enabled = outro_enabled
+        self.outro_path = outro_path
+        self.outro_duration = outro_duration
+
         self._is_cancelled = False
 
     def cancel(self):
@@ -42,17 +85,43 @@ class ConverterWorker(QThread):
             
             w = header.image_width
             h = header.image_height
-            total_frames = header.frame_count
+            total_ser_frames = header.frame_count
 
-            # Check if output is GIF or MP4
+            start_idx = max(0, self.start_frame - 1)
+            if self.end_frame and self.end_frame > 0:
+                end_idx = min(total_ser_frames - 1, self.end_frame - 1)
+            else:
+                end_idx = total_ser_frames - 1
+
+            if start_idx > end_idx:
+                start_idx, end_idx = 0, total_ser_frames - 1
+
+            num_ser_selected = end_idx - start_idx + 1
+
+            # Intro and Outro setup
+            num_intro_frames = int(round(self.intro_duration * self.output_fps)) if (self.intro_enabled and self.intro_path) else 0
+            num_outro_frames = int(round(self.outro_duration * self.output_fps)) if (self.outro_enabled and self.outro_path) else 0
+
+            total_output_frames = num_intro_frames + num_ser_selected + num_outro_frames
+
+            # Load Intro/Outro images if enabled
+            intro_img = None
+            if num_intro_frames > 0:
+                self.status_changed.emit("Caricamento scheda di titolo iniziale (Intro)...")
+                intro_img = load_title_image(self.intro_path, (w, h))
+
+            outro_img = None
+            if num_outro_frames > 0:
+                self.status_changed.emit("Caricamento scheda di titolo finale (Outro)...")
+                outro_img = load_title_image(self.outro_path, (w, h))
+
             is_gif = self.mp4_path.lower().endswith('.gif')
 
             if is_gif:
-                self.status_changed.emit(f"Preparazione animazione GIF: {w}x{h}, {total_frames} fotogrammi...")
+                self.status_changed.emit(f"Preparazione GIF: {w}x{h}, {total_output_frames} fotogrammi totali...")
                 gif_frames = []
             else:
-                self.status_changed.emit(f"Preparazione video MP4: {w}x{h}, {total_frames} fotogrammi...")
-
+                self.status_changed.emit(f"Preparazione video MP4: {w}x{h}, {total_output_frames} fotogrammi...")
                 codecs_to_try = [
                     ('avc1', "H.264 (avc1)"),
                     ('H264', "H.264 (H264)"),
@@ -67,8 +136,6 @@ class ConverterWorker(QThread):
                         raise InterruptedError("Conversione annullata dall'utente.")
                     
                     fourcc = cv2.VideoWriter_fourcc(*fourcc_str)
-                    
-                    # Try with quality parameter first (unsupported by some backends but great if works)
                     try:
                         test_writer = cv2.VideoWriter(
                             self.mp4_path, 
@@ -81,7 +148,6 @@ class ConverterWorker(QThread):
                         test_writer = cv2.VideoWriter(self.mp4_path, fourcc, self.output_fps, (w, h))
 
                     if not test_writer.isOpened():
-                        # Fallback to standard
                         test_writer.release()
                         test_writer = cv2.VideoWriter(self.mp4_path, fourcc, self.output_fps, (w, h))
 
@@ -98,12 +164,29 @@ class ConverterWorker(QThread):
                                 pass
 
                 if writer is None:
-                    raise RuntimeError("Impossibile inizializzare alcun codec video compatibile (avc1, H264, mp4v) su questa macchina.")
+                    raise RuntimeError("Impossibile inizializzare alcun codec video compatibile su questa macchina.")
 
-                self.status_changed.emit(f"Codificatore selezionato: {chosen_codec_name} (Qualità: {self.quality}%). Avvio conversione...")
+                self.status_changed.emit(f"Codificatore selezionato: {chosen_codec_name}. Avvio conversione...")
 
-            # Frame conversion loop
-            for idx in range(total_frames):
+            current_processed_count = 0
+
+            # 1. Render Intro frames
+            if num_intro_frames > 0 and intro_img is not None:
+                self.status_changed.emit(f"Scrittura titolo iniziale (Intro: {self.intro_duration:.1f}s)...")
+                for _ in range(num_intro_frames):
+                    if self._is_cancelled:
+                        raise InterruptedError("Conversione annullata dall'utente.")
+                    if is_gif:
+                        rgb_intro = cv2.cvtColor(intro_img, cv2.COLOR_BGR2RGB)
+                        gif_frames.append(Image.fromarray(rgb_intro))
+                    else:
+                        writer.write(intro_img)
+                    current_processed_count += 1
+                    pct = int((current_processed_count / total_output_frames) * 100)
+                    self.progress_changed.emit(pct)
+
+            # 2. Render Main SER frames (within trim range)
+            for idx in range(start_idx, end_idx + 1):
                 if self._is_cancelled:
                     raise InterruptedError("Conversione annullata dall'utente.")
 
@@ -117,25 +200,58 @@ class ConverterWorker(QThread):
                     debayer_algorithm=self.debayer_algorithm
                 )
 
+                # Post-processing: HSL Colorization
+                if self.hsl_enabled:
+                    frame = apply_hsl_colorization(
+                        frame,
+                        enabled=True,
+                        preset=self.hsl_preset,
+                        hue=self.hsl_hue,
+                        saturation=self.hsl_saturation,
+                        luminance=self.hsl_luminance
+                    )
+
+                # Post-processing: Logo Overlay
+                if self.logo_enabled and self.logo_path:
+                    frame = apply_logo_overlay(
+                        frame,
+                        logo_path=self.logo_path,
+                        position=self.logo_position,
+                        scale_pct=self.logo_scale,
+                        opacity_pct=self.logo_opacity
+                    )
+
                 if is_gif:
-                    # Convert BGR (OpenCV default) to RGB for PIL
                     frame_rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
-                    pil_img = Image.fromarray(frame_rgb)
-                    gif_frames.append(pil_img)
+                    gif_frames.append(Image.fromarray(frame_rgb))
                 else:
                     writer.write(frame)
 
-                progress_pct = int(((idx + 1) / total_frames) * 100)
-                self.progress_changed.emit(progress_pct)
-                if idx % 10 == 0 or idx == total_frames - 1:
-                    self.status_changed.emit(f"Elaborazione in corso: fotogramma {idx + 1} di {total_frames} ({progress_pct}%)")
+                current_processed_count += 1
+                pct = int((current_processed_count / total_output_frames) * 100)
+                self.progress_changed.emit(pct)
+                if current_processed_count % 10 == 0 or current_processed_count == total_output_frames:
+                    self.status_changed.emit(f"Elaborazione in corso: {current_processed_count} / {total_output_frames} ({pct}%)")
+
+            # 3. Render Outro frames
+            if num_outro_frames > 0 and outro_img is not None:
+                self.status_changed.emit(f"Scrittura titolo finale (Outro: {self.outro_duration:.1f}s)...")
+                for _ in range(num_outro_frames):
+                    if self._is_cancelled:
+                        raise InterruptedError("Conversione annullata dall'utente.")
+                    if is_gif:
+                        rgb_outro = cv2.cvtColor(outro_img, cv2.COLOR_BGR2RGB)
+                        gif_frames.append(Image.fromarray(rgb_outro))
+                    else:
+                        writer.write(outro_img)
+                    current_processed_count += 1
+                    pct = int((current_processed_count / total_output_frames) * 100)
+                    self.progress_changed.emit(pct)
 
             # Finalize output
             if is_gif:
                 self.status_changed.emit("Scrittura del file animato GIF in corso (ottimizzazione dei colori)...")
                 duration_ms = int(1000.0 / self.output_fps) if self.output_fps > 0 else 33
-                
-                # Save as animated GIF using PIL
                 gif_frames[0].save(
                     self.mp4_path,
                     save_all=True,

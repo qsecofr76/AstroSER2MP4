@@ -2,17 +2,66 @@ import os
 import sys
 import cv2
 import numpy as np
+from typing import Optional
 from PyQt6.QtWidgets import (
     QApplication, QMainWindow, QWidget, QVBoxLayout, QHBoxLayout,
     QGridLayout, QFrame, QLabel, QPushButton, QSlider, QCheckBox,
-    QDoubleSpinBox, QFileDialog, QGroupBox, QProgressBar, QComboBox,
-    QMessageBox, QLineEdit, QScrollArea
+    QDoubleSpinBox, QSpinBox, QFileDialog, QGroupBox, QProgressBar, QComboBox,
+    QMessageBox, QLineEdit, QScrollArea, QTabWidget, QStyleOptionSlider, QStyle
 )
 from PyQt6.QtCore import Qt, pyqtSignal
-from PyQt6.QtGui import QImage, QPixmap, QIcon
+from PyQt6.QtGui import QImage, QPixmap, QIcon, QPainter, QPen, QColor
 
 from ser_parser import SERParser
 from converter_worker import ConverterWorker
+from image_utils import apply_hsl_colorization, apply_logo_overlay
+
+class BookmarkSlider(QSlider):
+    def __init__(self, orientation, parent=None):
+        super().__init__(orientation, parent)
+        self.start_bookmark = None  # 0-indexed frame
+        self.end_bookmark = None    # 0-indexed frame
+
+    def set_bookmarks(self, start_idx: Optional[int], end_idx: Optional[int]):
+        self.start_bookmark = start_idx
+        self.end_bookmark = end_idx
+        self.update()
+
+    def paintEvent(self, event):
+        super().paintEvent(event)
+        if self.minimum() >= self.maximum():
+            return
+
+        opt = QStyleOptionSlider()
+        self.initStyleOption(opt)
+        groove_rect = self.style().subControlRect(
+            QStyle.ComplexControl.CC_Slider, opt, QStyle.SubControl.SC_SliderGroove, self
+        )
+
+        total_range = float(self.maximum() - self.minimum())
+        if total_range <= 0:
+            return
+
+        painter = QPainter(self)
+        painter.setRenderHint(QPainter.RenderHint.Antialiasing)
+
+        w = groove_rect.width()
+        y_top = groove_rect.top() - 3
+        h = groove_rect.height() + 6
+
+        # Draw Start Crop Bookmark Line (Green)
+        if self.start_bookmark is not None and self.minimum() <= self.start_bookmark <= self.maximum():
+            ratio = (self.start_bookmark - self.minimum()) / total_range
+            x = groove_rect.left() + int(ratio * w)
+            painter.setPen(QPen(QColor("#2ea44f"), 3))
+            painter.drawLine(x, y_top, x, y_top + h)
+
+        # Draw End Crop Bookmark Line (Red)
+        if self.end_bookmark is not None and self.minimum() <= self.end_bookmark <= self.maximum():
+            ratio = (self.end_bookmark - self.minimum()) / total_range
+            x = groove_rect.left() + int(ratio * w)
+            painter.setPen(QPen(QColor("#dc2626"), 3))
+            painter.drawLine(x, y_top, x, y_top + h)
 
 class DropFrame(QFrame):
     file_dropped = pyqtSignal(str)
@@ -23,7 +72,7 @@ class DropFrame(QFrame):
         self.setObjectName("drop-frame")
         self.setAcceptDrops(True)
         self.setCursor(Qt.CursorShape.PointingHandCursor)
-        self.setMinimumHeight(90)
+        self.setFixedHeight(50)
 
     def dragEnterEvent(self, event):
         if event.mimeData().hasUrls():
@@ -54,8 +103,8 @@ class MainWindow(QMainWindow):
     def __init__(self):
         super().__init__()
         self.setWindowTitle("AstroSER to MP4 Converter")
-        self.resize(1100, 850)
-        self.setMinimumSize(950, 720)
+        self.resize(1150, 880)
+        self.setMinimumSize(980, 750)
         
         self.current_ser_path = None
         self.parser = None
@@ -70,8 +119,8 @@ class MainWindow(QMainWindow):
         central_widget = QWidget()
         self.setCentralWidget(central_widget)
         main_layout = QVBoxLayout(central_widget)
-        main_layout.setContentsMargins(15, 15, 15, 15)
-        main_layout.setSpacing(12)
+        main_layout.setContentsMargins(15, 12, 15, 12)
+        main_layout.setSpacing(10)
 
         # 1. Header Title
         title_label = QLabel("AstroSER to MP4 Converter")
@@ -79,48 +128,45 @@ class MainWindow(QMainWindow):
         title_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
         main_layout.addWidget(title_label)
 
-        # 2. Drag & Drop Area
+        # 2. Compact Drag & Drop Area
         self.drop_frame = DropFrame()
-        drop_layout = QVBoxLayout(self.drop_frame)
+        drop_layout = QHBoxLayout(self.drop_frame)
         drop_layout.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        drop_layout.setSpacing(6)
-        drop_layout.setContentsMargins(10, 10, 10, 10)
+        drop_layout.setSpacing(10)
+        drop_layout.setContentsMargins(15, 5, 15, 5)
         
         self.lbl_drop_icon = QLabel("📁")
         self.lbl_drop_icon.setObjectName("drop-icon")
-        self.lbl_drop_icon.setAlignment(Qt.AlignmentFlag.AlignCenter)
         drop_layout.addWidget(self.lbl_drop_icon)
 
         self.lbl_drop_text = QLabel("Trascina qui il file .SER o fai clic per sfogliare")
         self.lbl_drop_text.setObjectName("drop-text")
-        self.lbl_drop_text.setAlignment(Qt.AlignmentFlag.AlignCenter)
         drop_layout.addWidget(self.lbl_drop_text)
 
         self.drop_frame.file_dropped.connect(self.load_ser_file)
         self.drop_frame.clicked.connect(self.browse_ser_file)
         main_layout.addWidget(self.drop_frame)
 
-        # 3. Content Panel
+        # 3. Main Content Panel (Left Tabs | Right Preview)
         content_layout = QHBoxLayout()
         content_layout.setSpacing(15)
         main_layout.addLayout(content_layout, stretch=1)
 
-        # Left Column - Scroll Area
-        scroll_area = QScrollArea()
-        scroll_area.setWidgetResizable(True)
-        scroll_area.setFrameShape(QFrame.Shape.NoFrame)
-        scroll_area.setMinimumWidth(450)
+        # Left Column - QTabWidget
+        self.tabs = QTabWidget()
+        self.tabs.setMinimumWidth(460)
 
-        left_widget = QWidget()
-        left_col = QVBoxLayout(left_widget)
-        left_col.setContentsMargins(0, 0, 10, 0)
-        left_col.setSpacing(12)
+        # --- TAB 1: 📷 Immagine & Colore ---
+        tab_img = QWidget()
+        tab_img_layout = QVBoxLayout(tab_img)
+        tab_img_layout.setContentsMargins(10, 10, 10, 10)
+        tab_img_layout.setSpacing(10)
 
-        # 3a. Metadata Group
+        # Metadati Group
         self.grp_meta = QGroupBox("Metadati File SER")
         meta_grid = QGridLayout(self.grp_meta)
         meta_grid.setSpacing(6)
-        meta_grid.setContentsMargins(12, 20, 12, 12)
+        meta_grid.setContentsMargins(12, 18, 12, 12)
         
         self.lbl_meta_file = QLabel("File: -")
         self.lbl_meta_dim = QLabel("Risoluzione: -")
@@ -141,13 +187,13 @@ class MainWindow(QMainWindow):
         meta_grid.addWidget(self.lbl_meta_instrument, 4, 0, 1, 2)
         meta_grid.addWidget(self.lbl_meta_telescope, 5, 0, 1, 2)
         meta_grid.addWidget(self.lbl_meta_date, 6, 0, 1, 2)
-        left_col.addWidget(self.grp_meta)
+        tab_img_layout.addWidget(self.grp_meta)
 
-        # 3b. Debayer & Color Group
+        # Bayer & Color Group
         self.grp_bayer = QGroupBox("Correzione Colore & Pattern Bayer")
         bayer_layout = QVBoxLayout(self.grp_bayer)
-        bayer_layout.setSpacing(10)
-        bayer_layout.setContentsMargins(12, 20, 12, 12)
+        bayer_layout.setSpacing(8)
+        bayer_layout.setContentsMargins(12, 18, 12, 12)
 
         pattern_hbox = QHBoxLayout()
         lbl_pat = QLabel("Pattern Bayer / Modalità:")
@@ -157,6 +203,7 @@ class MainWindow(QMainWindow):
         self.cmb_pattern = QComboBox()
         self.cmb_pattern.addItems([
             "Auto (dall'Header)",
+            "Disattivato (Già a Colori / RGB)",
             "Bayer RGGB",
             "Bayer BGGR",
             "Bayer GRBG",
@@ -165,7 +212,7 @@ class MainWindow(QMainWindow):
             "RGB Intercalato",
             "RGB Planare"
         ])
-        self.cmb_pattern.currentIndexChanged.connect(self.refresh_preview)
+        self.cmb_pattern.currentIndexChanged.connect(self.on_pattern_changed)
         pattern_hbox.addWidget(self.cmb_pattern, stretch=1)
         bayer_layout.addLayout(pattern_hbox)
 
@@ -189,47 +236,13 @@ class MainWindow(QMainWindow):
         self.chk_awb.stateChanged.connect(self.refresh_preview)
         bayer_layout.addWidget(self.chk_awb)
 
-        left_col.addWidget(self.grp_bayer)
+        tab_img_layout.addWidget(self.grp_bayer)
 
-        # 3c. Speed Settings Group
-        self.grp_speed = QGroupBox("Regolazione Velocità")
-        speed_layout = QVBoxLayout(self.grp_speed)
-        speed_layout.setSpacing(10)
-        speed_layout.setContentsMargins(12, 20, 12, 12)
-
-        fps_hbox = QHBoxLayout()
-        lbl_fps = QLabel("FPS Video Output:")
-        lbl_fps.setMinimumWidth(160)
-        fps_hbox.addWidget(lbl_fps)
-
-        self.num_fps = QDoubleSpinBox()
-        self.num_fps.setRange(0.1, 240.0)
-        self.num_fps.setValue(30.0)
-        self.num_fps.setSingleStep(1.0)
-        self.num_fps.setDecimals(2)
-        self.num_fps.valueChanged.connect(self.update_multiplier_from_fps)
-        fps_hbox.addWidget(self.num_fps, stretch=1)
-        speed_layout.addLayout(fps_hbox)
-
-        mult_hbox = QHBoxLayout()
-        lbl_mult = QLabel("Moltiplicatore Velocità:")
-        lbl_mult.setMinimumWidth(160)
-        mult_hbox.addWidget(lbl_mult)
-
-        self.cmb_mult = QComboBox()
-        self.cmb_mult.addItems(["Personalizzato", "0.25x (Rallentato)", "0.5x", "1.0x (Normale)", "1.5x", "2.0x (Accelerato)", "5.0x", "10.0x"])
-        self.cmb_mult.setCurrentIndex(3)
-        self.cmb_mult.currentIndexChanged.connect(self.update_fps_from_multiplier)
-        mult_hbox.addWidget(self.cmb_mult, stretch=1)
-        speed_layout.addLayout(mult_hbox)
-        
-        left_col.addWidget(self.grp_speed)
-
-        # 3d. Enhancements Group
+        # Enhancements Group
         self.grp_enh = QGroupBox("Luminosità & Stiramento Gamma")
         enh_layout = QVBoxLayout(self.grp_enh)
-        enh_layout.setSpacing(10)
-        enh_layout.setContentsMargins(12, 20, 12, 12)
+        enh_layout.setSpacing(8)
+        enh_layout.setContentsMargins(12, 18, 12, 12)
 
         self.chk_stretch = QCheckBox("Auto-Stretch (Ottimizzazione Contrasto)")
         self.chk_stretch.setChecked(True)
@@ -254,17 +267,278 @@ class MainWindow(QMainWindow):
         self.sld_brightness.valueChanged.connect(self.on_brightness_changed)
         enh_layout.addWidget(self.sld_brightness)
 
-        left_col.addWidget(self.grp_enh)
-        left_col.addStretch(1)
+        tab_img_layout.addWidget(self.grp_enh)
+        tab_img_layout.addStretch(1)
+        self.tabs.addTab(tab_img, "📷 Immagine & Colore")
 
-        scroll_area.setWidget(left_widget)
-        content_layout.addWidget(scroll_area, stretch=1)
+        # --- TAB 2: ⏱️ Velocità & Taglio ---
+        tab_speed = QWidget()
+        tab_speed_layout = QVBoxLayout(tab_speed)
+        tab_speed_layout.setContentsMargins(10, 10, 10, 10)
+        tab_speed_layout.setSpacing(10)
+
+        # Speed Regulation Group
+        self.grp_speed = QGroupBox("Regolazione Velocità Video")
+        speed_layout = QVBoxLayout(self.grp_speed)
+        speed_layout.setSpacing(10)
+        speed_layout.setContentsMargins(12, 18, 12, 12)
+
+        fps_hbox = QHBoxLayout()
+        lbl_fps = QLabel("FPS Video Output:")
+        lbl_fps.setMinimumWidth(160)
+        fps_hbox.addWidget(lbl_fps)
+
+        self.num_fps = QDoubleSpinBox()
+        self.num_fps.setRange(0.1, 240.0)
+        self.num_fps.setValue(30.0)
+        self.num_fps.setSingleStep(1.0)
+        self.num_fps.setDecimals(2)
+        self.num_fps.valueChanged.connect(self.update_multiplier_from_fps)
+        fps_hbox.addWidget(self.num_fps, stretch=1)
+        speed_layout.addLayout(fps_hbox)
+
+        mult_hbox = QHBoxLayout()
+        lbl_mult = QLabel("Moltiplicatore Velocità:")
+        lbl_mult.setMinimumWidth(160)
+        mult_hbox.addWidget(lbl_mult)
+
+        self.cmb_mult = QComboBox()
+        self.cmb_mult.addItems([
+            "Personalizzato",
+            "0.1x (Molto Lento)",
+            "0.25x (1/4 Velocità)",
+            "0.33x (1/3 Velocità)",
+            "0.5x (1/2 Velocità)",
+            "0.75x",
+            "1.0x (Normale)",
+            "1.5x",
+            "2.0x (2x Accelerato)",
+            "3.0x (3x)",
+            "5.0x (5x)",
+            "10.0x (10x)"
+        ])
+        self.cmb_mult.setCurrentIndex(6) # 1.0x
+        self.cmb_mult.currentIndexChanged.connect(self.update_fps_from_multiplier)
+        mult_hbox.addWidget(self.cmb_mult, stretch=1)
+        speed_layout.addLayout(mult_hbox)
+
+        tab_speed_layout.addWidget(self.grp_speed)
+
+        # Trim / Crop Range Group
+        self.grp_trim = QGroupBox("Taglio Fotogrammi (Trim Range)")
+        trim_layout = QVBoxLayout(self.grp_trim)
+        trim_layout.setSpacing(10)
+        trim_layout.setContentsMargins(12, 18, 12, 12)
+
+        start_hbox = QHBoxLayout()
+        start_hbox.addWidget(QLabel("Da Fotogramma:"))
+        self.num_start_frame = QSpinBox()
+        self.num_start_frame.setRange(1, 999999)
+        self.num_start_frame.setValue(1)
+        self.num_start_frame.editingFinished.connect(self.on_start_frame_changed)
+        self.num_start_frame.valueChanged.connect(self.on_start_frame_changed)
+        start_hbox.addWidget(self.num_start_frame, stretch=1)
+
+        self.btn_set_start_frame = QPushButton("Da Anteprima")
+        self.btn_set_start_frame.clicked.connect(self.set_start_from_preview)
+        start_hbox.addWidget(self.btn_set_start_frame)
+        trim_layout.addLayout(start_hbox)
+
+        end_hbox = QHBoxLayout()
+        end_hbox.addWidget(QLabel("A Fotogramma:"))
+        self.num_end_frame = QSpinBox()
+        self.num_end_frame.setRange(1, 999999)
+        self.num_end_frame.setValue(1)
+        self.num_end_frame.editingFinished.connect(self.on_end_frame_changed)
+        self.num_end_frame.valueChanged.connect(self.on_end_frame_changed)
+        end_hbox.addWidget(self.num_end_frame, stretch=1)
+
+        self.btn_set_end_frame = QPushButton("Da Anteprima")
+        self.btn_set_end_frame.clicked.connect(self.set_end_from_preview)
+        end_hbox.addWidget(self.btn_set_end_frame)
+        trim_layout.addLayout(end_hbox)
+
+        self.lbl_trim_info = QLabel("Fotogrammi selezionati: 0 / 0")
+        self.lbl_trim_info.setObjectName("status-label")
+        trim_layout.addWidget(self.lbl_trim_info)
+
+        tab_speed_layout.addWidget(self.grp_trim)
+        tab_speed_layout.addStretch(1)
+        self.tabs.addTab(tab_speed, "⏱️ Velocità & Taglio")
+
+        # --- TAB 3: 🎨 Colorizzazione HSL ---
+        tab_hsl = QWidget()
+        tab_hsl_layout = QVBoxLayout(tab_hsl)
+        tab_hsl_layout.setContentsMargins(10, 10, 10, 10)
+        tab_hsl_layout.setSpacing(10)
+
+        self.grp_hsl = QGroupBox("Colorizzazione Solare & Tonalità (HSL)")
+        hsl_layout = QVBoxLayout(self.grp_hsl)
+        hsl_layout.setSpacing(10)
+        hsl_layout.setContentsMargins(12, 18, 12, 12)
+
+        self.chk_hsl_enable = QCheckBox("Abilita Colorizzazione (Colorize)")
+        self.chk_hsl_enable.stateChanged.connect(self.refresh_preview)
+        hsl_layout.addWidget(self.chk_hsl_enable)
+
+        preset_hbox = QHBoxLayout()
+        preset_hbox.addWidget(QLabel("Preset Colore:"))
+        self.cmb_hsl_preset = QComboBox()
+        self.cmb_hsl_preset.addItems([
+            "Rosso Solare H-alpha (656nm - Rubino)",
+            "Arancione Solare (Prominenze / Luce Solare)",
+            "Giallo Solare (Continuum / Luce Bianca)",
+            "Oro Solare",
+            "Calcio-K / CaK (393nm - Violetto)",
+            "Blu (Deep Sky)",
+            "Inferno (Falso Colore)",
+            "Plasma (Falso Colore)",
+            "Personalizzato"
+        ])
+        self.cmb_hsl_preset.currentIndexChanged.connect(self.on_hsl_preset_changed)
+        preset_hbox.addWidget(self.cmb_hsl_preset, stretch=1)
+        hsl_layout.addLayout(preset_hbox)
+
+        self.lbl_hsl_hue = QLabel("Tonalità / Hue (355°):")
+        hsl_layout.addWidget(self.lbl_hsl_hue)
+        self.sld_hsl_hue = QSlider(Qt.Orientation.Horizontal)
+        self.sld_hsl_hue.setRange(0, 360)
+        self.sld_hsl_hue.setValue(355)
+        self.sld_hsl_hue.valueChanged.connect(self.on_hsl_slider_changed)
+        hsl_layout.addWidget(self.sld_hsl_hue)
+
+        self.lbl_hsl_sat = QLabel("Saturazione (100%):")
+        hsl_layout.addWidget(self.lbl_hsl_sat)
+        self.sld_hsl_sat = QSlider(Qt.Orientation.Horizontal)
+        self.sld_hsl_sat.setRange(0, 300)
+        self.sld_hsl_sat.setValue(100)
+        self.sld_hsl_sat.valueChanged.connect(self.on_hsl_slider_changed)
+        hsl_layout.addWidget(self.sld_hsl_sat)
+
+        self.lbl_hsl_lum = QLabel("Luminosità (0):")
+        hsl_layout.addWidget(self.lbl_hsl_lum)
+        self.sld_hsl_lum = QSlider(Qt.Orientation.Horizontal)
+        self.sld_hsl_lum.setRange(-100, 100)
+        self.sld_hsl_lum.setValue(0)
+        self.sld_hsl_lum.valueChanged.connect(self.on_hsl_slider_changed)
+        hsl_layout.addWidget(self.sld_hsl_lum)
+
+        tab_hsl_layout.addWidget(self.grp_hsl)
+        tab_hsl_layout.addStretch(1)
+        self.tabs.addTab(tab_hsl, "🎨 Colorizzazione HSL")
+
+        # --- TAB 4: 🏷️ Logo & Titoli ---
+        tab_extras = QWidget()
+        tab_extras_layout = QVBoxLayout(tab_extras)
+        tab_extras_layout.setContentsMargins(10, 10, 10, 10)
+        tab_extras_layout.setSpacing(10)
+
+        # Logo Watermark Group
+        self.grp_logo = QGroupBox("Sovrapposizione Logo / Filigrana PNG")
+        logo_layout = QVBoxLayout(self.grp_logo)
+        logo_layout.setSpacing(8)
+        logo_layout.setContentsMargins(12, 18, 12, 12)
+
+        self.chk_logo_enable = QCheckBox("Sovrapponi Logo / Filigrana")
+        self.chk_logo_enable.stateChanged.connect(self.refresh_preview)
+        logo_layout.addWidget(self.chk_logo_enable)
+
+        logo_file_hbox = QHBoxLayout()
+        self.txt_logo_path = QLineEdit()
+        self.txt_logo_path.setPlaceholderText("Seleziona immagine PNG con trasparenza...")
+        self.txt_logo_path.textChanged.connect(self.refresh_preview)
+        logo_file_hbox.addWidget(self.txt_logo_path, stretch=1)
+        
+        self.btn_browse_logo = QPushButton("Sfoglia...")
+        self.btn_browse_logo.clicked.connect(self.browse_logo_file)
+        logo_file_hbox.addWidget(self.btn_browse_logo)
+        logo_layout.addLayout(logo_file_hbox)
+
+        pos_hbox = QHBoxLayout()
+        pos_hbox.addWidget(QLabel("Posizione Logo:"))
+        self.cmb_logo_pos = QComboBox()
+        self.cmb_logo_pos.addItems([
+            "In Basso a Destra",
+            "In Basso a Sinistra",
+            "In Alto a Destra",
+            "In Alto a Sinistra",
+            "Centro"
+        ])
+        self.cmb_logo_pos.currentIndexChanged.connect(self.refresh_preview)
+        pos_hbox.addWidget(self.cmb_logo_pos, stretch=1)
+        logo_layout.addLayout(pos_hbox)
+
+        self.lbl_logo_scale = QLabel("Dimensione Logo (15%):")
+        logo_layout.addWidget(self.lbl_logo_scale)
+        self.sld_logo_scale = QSlider(Qt.Orientation.Horizontal)
+        self.sld_logo_scale.setRange(5, 50)
+        self.sld_logo_scale.setValue(15)
+        self.sld_logo_scale.valueChanged.connect(self.on_logo_slider_changed)
+        logo_layout.addWidget(self.sld_logo_scale)
+
+        self.lbl_logo_opacity = QLabel("Opacità Logo (100%):")
+        logo_layout.addWidget(self.lbl_logo_opacity)
+        self.sld_logo_opacity = QSlider(Qt.Orientation.Horizontal)
+        self.sld_logo_opacity.setRange(10, 100)
+        self.sld_logo_opacity.setValue(100)
+        self.sld_logo_opacity.valueChanged.connect(self.on_logo_slider_changed)
+        logo_layout.addWidget(self.sld_logo_opacity)
+
+        tab_extras_layout.addWidget(self.grp_logo)
+
+        # Intro / Outro Title Cards Group
+        self.grp_titles = QGroupBox("Schede Titolo Iniziale ed Finale (Intro / Outro)")
+        titles_layout = QVBoxLayout(self.grp_titles)
+        titles_layout.setSpacing(8)
+        titles_layout.setContentsMargins(12, 18, 12, 12)
+
+        dur_hbox = QHBoxLayout()
+        dur_hbox.addWidget(QLabel("Durata Titoli Inizio/Fine:"))
+        self.num_title_duration = QDoubleSpinBox()
+        self.num_title_duration.setRange(0.5, 10.0)
+        self.num_title_duration.setValue(2.0)
+        self.num_title_duration.setSingleStep(0.5)
+        self.num_title_duration.setSuffix(" sec")
+        dur_hbox.addWidget(self.num_title_duration, stretch=1)
+        titles_layout.addLayout(dur_hbox)
+
+        # Intro
+        self.chk_intro_enable = QCheckBox("Titolo Iniziale (Intro)")
+        titles_layout.addWidget(self.chk_intro_enable)
+
+        intro_hbox = QHBoxLayout()
+        self.txt_intro_path = QLineEdit()
+        self.txt_intro_path.setPlaceholderText("Seleziona immagine/FITS per l'Intro...")
+        intro_hbox.addWidget(self.txt_intro_path, stretch=1)
+        self.btn_browse_intro = QPushButton("Sfoglia...")
+        self.btn_browse_intro.clicked.connect(self.browse_intro_file)
+        intro_hbox.addWidget(self.btn_browse_intro)
+        titles_layout.addLayout(intro_hbox)
+
+        # Outro
+        self.chk_outro_enable = QCheckBox("Titolo Finale (Outro)")
+        titles_layout.addWidget(self.chk_outro_enable)
+
+        outro_hbox = QHBoxLayout()
+        self.txt_outro_path = QLineEdit()
+        self.txt_outro_path.setPlaceholderText("Seleziona immagine/FITS per l'Outro...")
+        outro_hbox.addWidget(self.txt_outro_path, stretch=1)
+        self.btn_browse_outro = QPushButton("Sfoglia...")
+        self.btn_browse_outro.clicked.connect(self.browse_outro_file)
+        outro_hbox.addWidget(self.btn_browse_outro)
+        titles_layout.addLayout(outro_hbox)
+
+        tab_extras_layout.addWidget(self.grp_titles)
+        tab_extras_layout.addStretch(1)
+        self.tabs.addTab(tab_extras, "🏷️ Logo & Titoli")
+
+        content_layout.addWidget(self.tabs, stretch=1)
 
         # Right Column - Preview Area
         self.grp_preview = QGroupBox("Anteprima Fotogramma")
         preview_layout = QVBoxLayout(self.grp_preview)
         preview_layout.setSpacing(10)
-        preview_layout.setContentsMargins(12, 20, 12, 12)
+        preview_layout.setContentsMargins(12, 18, 12, 12)
 
         self.lbl_preview_img = QLabel("Carica un file .SER per visualizzare l'anteprima")
         self.lbl_preview_img.setObjectName("preview-img-label")
@@ -275,13 +549,21 @@ class MainWindow(QMainWindow):
         slider_hbox = QHBoxLayout()
         self.lbl_frame_idx = QLabel("Frame: 0 / 0")
         self.lbl_frame_idx.setMinimumWidth(110)
-        self.sld_preview = QSlider(Qt.Orientation.Horizontal)
+        
+        # Use custom BookmarkSlider to paint crop start/end bookmarks
+        self.sld_preview = BookmarkSlider(Qt.Orientation.Horizontal)
         self.sld_preview.setEnabled(False)
         self.sld_preview.valueChanged.connect(self.on_preview_slider_changed)
         
         slider_hbox.addWidget(self.lbl_frame_idx)
         slider_hbox.addWidget(self.sld_preview, stretch=1)
         preview_layout.addLayout(slider_hbox)
+
+        # Bookmark legend
+        self.lbl_legend = QLabel("🟢 Inizio Crop   🔴 Fine Crop")
+        self.lbl_legend.setObjectName("timestamp-label")
+        self.lbl_legend.setAlignment(Qt.AlignmentFlag.AlignRight)
+        preview_layout.addWidget(self.lbl_legend)
         
         self.lbl_frame_time = QLabel("Timestamp: -")
         self.lbl_frame_time.setAlignment(Qt.AlignmentFlag.AlignRight)
@@ -293,8 +575,8 @@ class MainWindow(QMainWindow):
         # 4. Output Path Selector & Convert Button
         self.grp_output = QGroupBox("Output Video / Esportazione")
         output_layout = QVBoxLayout(self.grp_output)
-        output_layout.setSpacing(10)
-        output_layout.setContentsMargins(12, 20, 12, 12)
+        output_layout.setSpacing(8)
+        output_layout.setContentsMargins(12, 18, 12, 12)
 
         format_hbox = QHBoxLayout()
         format_hbox.addWidget(QLabel("Formato Output:"))
@@ -353,9 +635,9 @@ class MainWindow(QMainWindow):
             }
             #app-title {
                 color: #58a6ff;
-                font-size: 22px;
+                font-size: 20px;
                 font-weight: bold;
-                padding-bottom: 5px;
+                padding-bottom: 3px;
                 border-bottom: 1px solid #21262d;
             }
             QGroupBox {
@@ -389,7 +671,7 @@ class MainWindow(QMainWindow):
             }
             #drop-frame {
                 border: 2px dashed #30363d;
-                border-radius: 12px;
+                border-radius: 8px;
                 background-color: #161b22;
             }
             #drop-frame:hover {
@@ -397,7 +679,7 @@ class MainWindow(QMainWindow):
                 background-color: #1c212a;
             }
             #drop-icon {
-                font-size: 32px;
+                font-size: 20px;
             }
             #drop-text {
                 font-size: 13px;
@@ -415,9 +697,9 @@ class MainWindow(QMainWindow):
                 color: #58a6ff;
                 border: 1px solid #30363d;
                 border-radius: 6px;
-                padding: 6px 14px;
+                padding: 5px 12px;
                 font-weight: bold;
-                min-height: 28px;
+                min-height: 26px;
             }
             QPushButton:hover {
                 background-color: #30363d;
@@ -471,18 +753,17 @@ class MainWindow(QMainWindow):
             QSlider::handle:horizontal:hover {
                 background: #1f6feb;
             }
-            QLineEdit, QComboBox, QDoubleSpinBox {
+            QLineEdit, QComboBox, QDoubleSpinBox, QSpinBox {
                 background-color: #0d1117;
                 border: 1px solid #30363d;
                 border-radius: 6px;
                 color: #c9d1d9;
                 padding: 4px 8px;
-                min-height: 26px;
+                min-height: 24px;
             }
             QComboBox::drop-down {
                 border: none;
             }
-            /* Explicit dark style for the dropdown popup list to prevent white-out bugs */
             QComboBox QAbstractItemView {
                 background-color: #1f242c;
                 border: 1px solid #30363d;
@@ -506,8 +787,31 @@ class MainWindow(QMainWindow):
                 background: #238636;
                 border-color: #2ea44f;
             }
-            QScrollArea {
-                background: transparent;
+            QTabWidget::pane {
+                border: 1px solid #30363d;
+                border-radius: 8px;
+                background-color: #161b22;
+                top: -1px;
+            }
+            QTabBar::tab {
+                background-color: #0d1117;
+                border: 1px solid #30363d;
+                border-bottom: none;
+                border-top-left-radius: 6px;
+                border-top-right-radius: 6px;
+                padding: 6px 12px;
+                color: #8b949e;
+                font-weight: bold;
+                font-size: 12px;
+                margin-right: 2px;
+            }
+            QTabBar::tab:selected {
+                background-color: #161b22;
+                color: #58a6ff;
+                border-bottom: 2px solid #58a6ff;
+            }
+            QTabBar::tab:hover {
+                color: #c9d1d9;
             }
         """
         self.setStyleSheet(style)
@@ -535,28 +839,44 @@ class MainWindow(QMainWindow):
             header = self.parser.header
 
             filename = os.path.basename(file_path)
-            self.lbl_drop_text.setText(f"File caricato: {filename}\n(Fai clic o trascina un altro file per cambiarlo)")
+            self.lbl_drop_text.setText(f"File caricato: {filename} (Fai clic o trascina un altro file per cambiarlo)")
             self.lbl_drop_icon.setText("⭐")
 
             self.original_fps = self.parser.get_average_fps()
             self.num_fps.setValue(self.original_fps)
-            self.cmb_mult.setCurrentIndex(3)
+            self.cmb_mult.setCurrentIndex(6) # 1.0x
 
-            color_names = {
-                0: "Monocromatico",
-                1: "Bayer RGGB",
-                2: "Bayer GRBG",
-                3: "Bayer GBRG",
-                4: "Bayer BGGR",
-                8: "Bayer CYYM",
-                9: "Bayer YCMY",
-                16: "Bayer YMCY",
-                17: "Bayer MYYC",
-                100: "RGB Colore",
-                101: "BGR Colore"
-            }
-            color_str = color_names.get(header.color_id, f"Sconosciuto ({header.color_id})")
-            
+            is_already_debayered = header.color_id >= 100 or self.parser._channels == 3
+            if is_already_debayered:
+                if header.color_id == 100:
+                    color_str = "RGB Colore (Già Debayerizzato)"
+                elif header.color_id == 101:
+                    color_str = "BGR Colore (Già Debayerizzato)"
+                else:
+                    color_str = "RGB Colore (3 Canali - Già Debayerizzato)"
+            else:
+                color_names = {
+                    0: "Monocromatico",
+                    1: "Bayer RGGB",
+                    2: "Bayer GRBG",
+                    3: "Bayer GBRG",
+                    4: "Bayer BGGR",
+                    8: "Bayer CYYM",
+                    9: "Bayer YCMY",
+                    16: "Bayer YMCY",
+                    17: "Bayer MYYC"
+                }
+                color_str = color_names.get(header.color_id, f"Sconosciuto ({header.color_id})")
+
+            if is_already_debayered:
+                self.chk_awb.blockSignals(True)
+                self.chk_awb.setChecked(False)
+                self.chk_awb.blockSignals(False)
+            else:
+                self.chk_awb.blockSignals(True)
+                self.chk_awb.setChecked(True)
+                self.chk_awb.blockSignals(False)
+
             duration_sec = header.frame_count / self.original_fps if self.original_fps > 0 else 0
             dur_min = int(duration_sec // 60)
             dur_sec = duration_sec % 60
@@ -573,6 +893,18 @@ class MainWindow(QMainWindow):
             date_str = header.datetime_utc.strftime("%d/%m/%Y %H:%M:%S UTC") if header.datetime_utc else "-"
             self.lbl_meta_date.setText(f"Data di Inizio: {date_str}")
 
+            # Configure Trim controls range
+            self.num_start_frame.blockSignals(True)
+            self.num_end_frame.blockSignals(True)
+            self.num_start_frame.setRange(1, header.frame_count)
+            self.num_start_frame.setValue(1)
+            self.num_end_frame.setRange(1, header.frame_count)
+            self.num_end_frame.setValue(header.frame_count)
+            self.num_start_frame.blockSignals(False)
+            self.num_end_frame.blockSignals(False)
+
+            self.update_bookmarks()
+            self.update_trim_info()
             self.update_output_path_extension()
 
             self.sld_preview.setEnabled(True)
@@ -580,6 +912,7 @@ class MainWindow(QMainWindow):
             self.sld_preview.setValue(0)
             self.lbl_frame_idx.setText(f"Frame: 1 / {header.frame_count}")
 
+            self.update_debayer_algo_state()
             self.on_preview_slider_changed(0)
             self.lbl_status.setText("File SER caricato con successo.")
 
@@ -589,13 +922,25 @@ class MainWindow(QMainWindow):
 
     def get_current_bayer_mode(self) -> str:
         idx = self.cmb_pattern.currentIndex()
-        modes = ["AUTO", "RGGB", "BGGR", "GRBG", "GBRG", "MONO", "RGB", "RGB_PLANAR"]
+        modes = ["AUTO", "DISABLED", "RGGB", "BGGR", "GRBG", "GBRG", "MONO", "RGB", "RGB_PLANAR"]
         return modes[idx] if idx < len(modes) else "AUTO"
 
     def get_current_debayer_algo(self) -> str:
         idx = self.cmb_algo.currentIndex()
         algos = ["EA", "VNG", "BILINEAR"]
         return algos[idx] if idx < len(algos) else "EA"
+
+    def update_debayer_algo_state(self):
+        mode = self.get_current_bayer_mode()
+        is_already_debayered = self.parser and (self.parser.header.color_id >= 100 or self.parser._channels == 3)
+        if mode in ["DISABLED", "MONO", "RGB", "RGB_PLANAR"] or (mode == "AUTO" and is_already_debayered):
+            self.cmb_algo.setEnabled(False)
+        else:
+            self.cmb_algo.setEnabled(True)
+
+    def on_pattern_changed(self):
+        self.update_debayer_algo_state()
+        self.refresh_preview()
 
     def on_preview_slider_changed(self, val: int):
         if not self.parser:
@@ -620,6 +965,28 @@ class MainWindow(QMainWindow):
                 color_mode_override=color_mode,
                 debayer_algorithm=debayer_algo
             )
+
+            # Apply HSL Colorization in Live Preview
+            if self.chk_hsl_enable.isChecked():
+                frame_bgr = apply_hsl_colorization(
+                    frame_bgr,
+                    enabled=True,
+                    preset=self.cmb_hsl_preset.currentText(),
+                    hue=self.sld_hsl_hue.value(),
+                    saturation=self.sld_hsl_sat.value(),
+                    luminance=self.sld_hsl_lum.value()
+                )
+
+            # Apply Logo Overlay in Live Preview
+            if self.chk_logo_enable.isChecked() and self.txt_logo_path.text().strip():
+                frame_bgr = apply_logo_overlay(
+                    frame_bgr,
+                    logo_path=self.txt_logo_path.text().strip(),
+                    position=self.cmb_logo_pos.currentText(),
+                    scale_pct=self.sld_logo_scale.value(),
+                    opacity_pct=self.sld_logo_opacity.value()
+                )
+
             self.current_preview_frame = frame_bgr
             self.display_preview(frame_bgr)
 
@@ -645,6 +1012,162 @@ class MainWindow(QMainWindow):
     def on_brightness_changed(self, val: int):
         self.lbl_brightness.setText(f"Luminosità Lineare ({val}):")
         self.refresh_preview()
+
+    def on_hsl_preset_changed(self, idx: int):
+        preset_name = self.cmb_hsl_preset.currentText()
+        is_colormap = preset_name in ["Inferno (Falso Colore)", "Plasma (Falso Colore)"]
+        
+        self.sld_hsl_hue.setEnabled(not is_colormap)
+        self.sld_hsl_sat.setEnabled(not is_colormap)
+        self.sld_hsl_lum.setEnabled(not is_colormap)
+
+        preset_defaults = {
+            "Rosso Solare H-alpha (656nm - Rubino)": (355, 100, 0),
+            "Arancione Solare (Prominenze / Luce Solare)": (20, 100, 0),
+            "Giallo Solare (Continuum / Luce Bianca)": (38, 90, 0),
+            "Oro Solare": (32, 85, 0),
+            "Calcio-K / CaK (393nm - Violetto)": (270, 100, 0),
+            "Blu (Deep Sky)": (210, 90, 0),
+        }
+        if preset_name in preset_defaults:
+            h, s, v = preset_defaults[preset_name]
+            self.sld_hsl_hue.blockSignals(True)
+            self.sld_hsl_sat.blockSignals(True)
+            self.sld_hsl_lum.blockSignals(True)
+            self.sld_hsl_hue.setValue(h)
+            self.sld_hsl_sat.setValue(s)
+            self.sld_hsl_lum.setValue(v)
+            self.lbl_hsl_hue.setText(f"Tonalità / Hue ({h}°):")
+            self.lbl_hsl_sat.setText(f"Saturazione ({s}%):")
+            self.lbl_hsl_lum.setText(f"Luminosità ({v}):")
+            self.sld_hsl_hue.blockSignals(False)
+            self.sld_hsl_sat.blockSignals(False)
+            self.sld_hsl_lum.blockSignals(False)
+
+        self.refresh_preview()
+
+    def on_hsl_slider_changed(self, val: int):
+        self.lbl_hsl_hue.setText(f"Tonalità / Hue ({self.sld_hsl_hue.value()}°):")
+        self.lbl_hsl_sat.setText(f"Saturazione ({self.sld_hsl_sat.value()}%):")
+        self.lbl_hsl_lum.setText(f"Luminosità ({self.sld_hsl_lum.value()}):")
+        self.refresh_preview()
+
+    def on_logo_slider_changed(self, val: int):
+        self.lbl_logo_scale.setText(f"Dimensione Logo ({self.sld_logo_scale.value()}%):")
+        self.lbl_logo_opacity.setText(f"Opacità Logo ({self.sld_logo_opacity.value()}%):")
+        self.refresh_preview()
+
+    def update_fps_from_multiplier(self, idx: int):
+        if not self.parser:
+            return
+        
+        multipliers = [1.0, 0.1, 0.25, 0.33333, 0.5, 0.75, 1.0, 1.5, 2.0, 3.0, 5.0, 10.0]
+        if idx == 0:
+            return
+        
+        factor = multipliers[idx]
+        new_fps = round(self.original_fps * factor, 2)
+        self.num_fps.blockSignals(True)
+        self.num_fps.setValue(new_fps)
+        self.num_fps.blockSignals(False)
+        self.update_trim_info()
+
+    def update_multiplier_from_fps(self, fps_val: float):
+        if not self.parser:
+            return
+        self.cmb_mult.blockSignals(True)
+        self.cmb_mult.setCurrentIndex(0)
+        self.cmb_mult.blockSignals(False)
+        self.update_trim_info()
+
+    def on_start_frame_changed(self):
+        if not self.parser:
+            return
+        start_f = self.num_start_frame.value()
+        self.sld_preview.blockSignals(True)
+        self.sld_preview.setValue(start_f - 1)
+        self.sld_preview.blockSignals(False)
+        self.update_bookmarks()
+        self.update_trim_info()
+        self.on_preview_slider_changed(start_f - 1)
+
+    def on_end_frame_changed(self):
+        if not self.parser:
+            return
+        end_f = self.num_end_frame.value()
+        self.sld_preview.blockSignals(True)
+        self.sld_preview.setValue(end_f - 1)
+        self.sld_preview.blockSignals(False)
+        self.update_bookmarks()
+        self.update_trim_info()
+        self.on_preview_slider_changed(end_f - 1)
+
+    def set_start_from_preview(self):
+        if self.parser:
+            curr = self.sld_preview.value() + 1
+            self.num_start_frame.setValue(curr)
+            self.on_start_frame_changed()
+
+    def set_end_from_preview(self):
+        if self.parser:
+            curr = self.sld_preview.value() + 1
+            self.num_end_frame.setValue(curr)
+            self.on_end_frame_changed()
+
+    def update_bookmarks(self):
+        if self.parser:
+            s = self.num_start_frame.value() - 1
+            e = self.num_end_frame.value() - 1
+            self.sld_preview.set_bookmarks(s, e)
+
+    def update_trim_info(self):
+        if not self.parser:
+            self.lbl_trim_info.setText("Fotogrammi selezionati: 0 / 0")
+            return
+
+        start_f = self.num_start_frame.value()
+        end_f = self.num_end_frame.value()
+        
+        if start_f > end_f:
+            self.lbl_trim_info.setText("Attenzione: Fotogramma Inizio maggiore di Fine!")
+            return
+
+        total_sel = end_f - start_f + 1
+        fps = self.num_fps.value()
+        dur_sec = total_sel / fps if fps > 0 else 0
+        dur_min = int(dur_sec // 60)
+        dur_rem_sec = dur_sec % 60
+
+        self.lbl_trim_info.setText(
+            f"Fotogrammi selezionati: {start_f} - {end_f} ({total_sel} fotogrammi ~{dur_min}m {dur_rem_sec:.1f}s)"
+        )
+
+    def browse_logo_file(self):
+        file_path, _ = QFileDialog.getOpenFileName(
+            self, "Seleziona Immagine Logo PNG", "", "Immagini PNG (*.png);;Tutti i File (*.*)"
+        )
+        if file_path:
+            self.txt_logo_path.setText(file_path)
+            self.chk_logo_enable.setChecked(True)
+            self.refresh_preview()
+
+    def browse_intro_file(self):
+        file_path, _ = QFileDialog.getOpenFileName(
+            self, "Seleziona Titolo Iniziale (Intro)", "",
+            "Immagini e FITS (*.png *.jpg *.jpeg *.bmp *.tif *.tiff *.fit *.fits);;Tutti i File (*.*)"
+        )
+        if file_path:
+            self.txt_intro_path.setText(file_path)
+            self.chk_intro_enable.setChecked(True)
+
+    def browse_outro_file(self):
+        file_path, _ = QFileDialog.getOpenFileName(
+            self, "Seleziona Titolo Finale (Outro)", "",
+            "Immagini e FITS (*.png *.jpg *.jpeg *.bmp *.tif *.tiff *.fit *.fits);;Tutti i File (*.*)"
+        )
+        if file_path:
+            self.txt_outro_path.setText(file_path)
+            self.chk_outro_enable.setChecked(True)
 
     def on_quality_slider_changed(self, val: int):
         self.lbl_quality.setText(f"Qualità video MP4 ({val}%):")
@@ -682,27 +1205,6 @@ class MainWindow(QMainWindow):
         )
         self.lbl_preview_img.setPixmap(scaled_pixmap)
 
-    def update_fps_from_multiplier(self, idx: int):
-        if not self.parser:
-            return
-        
-        multipliers = [1.0, 0.25, 0.5, 1.0, 1.5, 2.0, 5.0, 10.0]
-        if idx == 0:
-            return
-        
-        factor = multipliers[idx]
-        new_fps = self.original_fps * factor
-        self.num_fps.blockSignals(True)
-        self.num_fps.setValue(new_fps)
-        self.num_fps.blockSignals(False)
-
-    def update_multiplier_from_fps(self, fps_val: float):
-        if not self.parser:
-            return
-        self.cmb_mult.blockSignals(True)
-        self.cmb_mult.setCurrentIndex(0)
-        self.cmb_mult.blockSignals(False)
-
     def browse_output_path(self):
         if not self.current_ser_path:
             initial_dir = ""
@@ -734,6 +1236,12 @@ class MainWindow(QMainWindow):
             QMessageBox.warning(self, "Percorso Output vuoto", "Seleziona un percorso di destinazione per il file di output.")
             return
 
+        start_f = self.num_start_frame.value()
+        end_f = self.num_end_frame.value()
+        if start_f > end_f:
+            QMessageBox.warning(self, "Intervallo Fotogrammi Errato", "Il fotogramma iniziale non può essere maggiore di quello finale.")
+            return
+
         fps = self.num_fps.value()
         auto_stretch = self.chk_stretch.isChecked()
         auto_wb = self.chk_awb.isChecked()
@@ -761,7 +1269,25 @@ class MainWindow(QMainWindow):
             gamma=gamma,
             color_mode_override=color_mode,
             debayer_algorithm=debayer_algo,
-            quality=quality
+            quality=quality,
+            start_frame=start_f,
+            end_frame=end_f,
+            hsl_enabled=self.chk_hsl_enable.isChecked(),
+            hsl_preset=self.cmb_hsl_preset.currentText(),
+            hsl_hue=self.sld_hsl_hue.value(),
+            hsl_saturation=self.sld_hsl_sat.value(),
+            hsl_luminance=self.sld_hsl_lum.value(),
+            logo_enabled=self.chk_logo_enable.isChecked(),
+            logo_path=self.txt_logo_path.text().strip(),
+            logo_position=self.cmb_logo_pos.currentText(),
+            logo_scale=self.sld_logo_scale.value(),
+            logo_opacity=self.sld_logo_opacity.value(),
+            intro_enabled=self.chk_intro_enable.isChecked(),
+            intro_path=self.txt_intro_path.text().strip(),
+            intro_duration=self.num_title_duration.value(),
+            outro_enabled=self.chk_outro_enable.isChecked(),
+            outro_path=self.txt_outro_path.text().strip(),
+            outro_duration=self.num_title_duration.value()
         )
         self.worker.progress_changed.connect(self.progress_bar.setValue)
         self.worker.status_changed.connect(self.lbl_status.setText)
@@ -770,9 +1296,7 @@ class MainWindow(QMainWindow):
 
     def set_controls_enabled(self, enabled: bool):
         self.drop_frame.setEnabled(enabled)
-        self.grp_speed.setEnabled(enabled)
-        self.grp_enh.setEnabled(enabled)
-        self.grp_bayer.setEnabled(enabled)
+        self.tabs.setEnabled(enabled)
         self.sld_preview.setEnabled(enabled and self.parser is not None)
         self.txt_output_path.setEnabled(enabled)
         self.btn_browse_out.setEnabled(enabled)
