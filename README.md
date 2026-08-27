@@ -7,7 +7,7 @@
 ## Caratteristiche principali
 
 * **Drag & Drop Compatto**: Trascina il file `.ser` nell'area superiore per caricarlo istantaneamente.
-* **Layout a Schede (Tabbed UI)**: Interfaccia organizzata in 4 schede tematiche (*Immagine & Colore*, *Velocità & Taglio*, *Colorizzazione HSL*, *Logo, Titoli & Audio*) per la massima chiarezza.
+* **Layout a Schede (Tabbed UI)**: Interfaccia organizzata in 4 schede tematiche (*Immagine & Colore*, *Velocità & Taglio*, *Colorizzazione HSL*, *Logo, Titoli & Audio*).
 * **Anteprima con Segnalibri di Crop Visivi**: Slider di anteprima avanzato (`BookmarkSlider`) con visualizzazione in tempo reale, salto automatico al fotogramma e **segnalibri visivi colorati (🟢 Inizio Crop, 🔴 Fine Crop)** tracciati direttamente sulla barra.
 
 ### 📷 Immagine & Colore
@@ -25,13 +25,9 @@
 * **Preset Astronomici Nativi**: **Rosso Solare H-alpha (656nm - Rubino)**, **Arancione Solare**, **Giallo Solare (Continuum)**, **Oro Solare**, **Calcio-K (393nm - Violetto)**, **Blu (Deep Sky)**, **Inferno** e **Plasma**.
 * **Regolazione HSL Personalizzata**: Cursori in tempo reale per **Tonalità (Hue 0-360°)**, **Saturazione** e **Luminosità**.
 
-### 🎵 Logo, Titoli & Colonna Sonora Audio (NUOVO v1.3.0)
-* **Incorporamento Colonna Sonora Audio nell'MP4**: Possibilità di aggiungere una traccia di sottofondo musicale al video `.mp4` esportato con ripetizione automatica in loop.
-* **Libreria Colonne Sonore Inclusa (`colonne_sonore/`)**:
-  * **Interstellar (Hans Zimmer Style)** (sketch da 30s)
-  * **Beethoven - Sonata al chiaro di luna** (sketch 30s & versione completa)
-  * **Beethoven - 5ª Sinfonia** (sketch 30s & versione completa)
-  * **File Audio Personalizzato**: Supporta caricamento di brani `.wav`, `.mp3`, `.ogg`, `.aac`, `.flac`.
+### 🎵 Logo, Titoli & Colonna Sonora Audio (v1.3.0)
+* **Integrazione Colonna Sonora Audio nell'MP4**: Seleziona qualsiasi file audio (`.mp3`, `.wav`, `.ogg`, `.aac`, `.flac`) per inserirlo come traccia di sottofondo musicale al video `.mp4` con ripetizione automatica in loop.
+* **Libreria Musiche Classiche Inclusa (`colonne_sonore/`)**: Include brani di musica classica in pubblico dominio (es. *Beethoven - Sonata al chiaro di luna*, *Beethoven - 5ª Sinfonia*).
 * **Filigrana Logo PNG**: Logo con trasparenza nei 4 angoli o al centro, dimensione (%) ed opacità (%) in anteprima live.
 * **Schede Titolo Iniziale e Finale (Intro / Outro)**: Titoli di testa e di coda con supporto nativo per formati **FITS / `.fit` / `.fits`** gestiti via `astropy`.
 

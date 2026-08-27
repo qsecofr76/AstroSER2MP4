@@ -14,6 +14,11 @@ __pycache__/
 *.gif
 *.png
 
+# Ignore commercial copyrighted audio tracks in colonne_sonore
+colonne_sonore/*Bowie*
+colonne_sonore/*Zimmer*
+colonne_sonore/*Parsons*
+
 # Virtual Environments
 .venv/
 venv/

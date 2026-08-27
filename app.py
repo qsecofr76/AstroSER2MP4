@@ -542,24 +542,9 @@ class MainWindow(QMainWindow):
         self.chk_audio_enable = QCheckBox("Includi Colonna Sonora Audio nel Video MP4")
         audio_layout.addWidget(self.chk_audio_enable)
 
-        audio_preset_hbox = QHBoxLayout()
-        audio_preset_hbox.addWidget(QLabel("Brano Audio:"))
-        self.cmb_audio_preset = QComboBox()
-        self.cmb_audio_preset.addItems([
-            "Interstellar - Hans Zimmer Style (30s)",
-            "Beethoven - Moonlight Sonata (30s)",
-            "Beethoven - 5th Symphony (30s)",
-            "Beethoven - Moonlight Sonata (Completo)",
-            "Beethoven - 5th Symphony (Completo)",
-            "Personalizzato (Sfoglia file audio...)"
-        ])
-        self.cmb_audio_preset.currentIndexChanged.connect(self.on_audio_preset_changed)
-        audio_preset_hbox.addWidget(self.cmb_audio_preset, stretch=1)
-        audio_layout.addLayout(audio_preset_hbox)
-
         audio_file_hbox = QHBoxLayout()
         self.txt_audio_path = QLineEdit()
-        self.txt_audio_path.setPlaceholderText("Seleziona file audio WAV / MP3 / OGG...")
+        self.txt_audio_path.setPlaceholderText("Seleziona file audio MP3 / WAV / OGG / AAC / FLAC...")
         audio_file_hbox.addWidget(self.txt_audio_path, stretch=1)
         self.btn_browse_audio = QPushButton("Sfoglia...")
         self.btn_browse_audio.clicked.connect(self.browse_audio_file)
@@ -580,9 +565,6 @@ class MainWindow(QMainWindow):
         tab_extras_main_layout.addWidget(tab_extras_scroll)
 
         self.tabs.addTab(tab_extras, "🎵 Logo, Titoli & Audio")
-
-        # Initialize default audio track path
-        self.on_audio_preset_changed(0)
 
         content_layout.addWidget(self.tabs, stretch=1)
 
@@ -1225,32 +1207,12 @@ class MainWindow(QMainWindow):
             self.txt_outro_path.setText(file_path)
             self.chk_outro_enable.setChecked(True)
 
-    def on_audio_preset_changed(self, idx: int):
-        soundtrack_dir = os.path.join(os.path.dirname(__file__), "colonne_sonore")
-        preset_files = {
-            0: "Interstellar_Hans_Zimmer_Style_30s.wav",
-            1: "Beethoven_Moonlight_Sonata_30s.wav",
-            2: "Beethoven_5th_Symphony_30s.wav",
-            3: "Beethoven_Moonlight_Sonata.ogg",
-            4: "Beethoven_5th_Symphony.ogg"
-        }
-        if idx in preset_files:
-            file_path = os.path.join(soundtrack_dir, preset_files[idx])
-            if os.path.exists(file_path):
-                self.txt_audio_path.setText(file_path)
-                self.chk_audio_enable.setChecked(True)
-            else:
-                self.txt_audio_path.setText("")
-
     def browse_audio_file(self):
         file_path, _ = QFileDialog.getOpenFileName(
             self, "Seleziona File Colonna Sonora Audio", "",
-            "File Audio (*.wav *.mp3 *.ogg *.aac *.m4a *.flac);;Tutti i File (*.*)"
+            "File Audio (*.mp3 *.wav *.ogg *.aac *.m4a *.flac);;Tutti i File (*.*)"
         )
         if file_path:
-            self.cmb_audio_preset.blockSignals(True)
-            self.cmb_audio_preset.setCurrentIndex(5) # Personalizzato
-            self.cmb_audio_preset.blockSignals(False)
             self.txt_audio_path.setText(file_path)
             self.chk_audio_enable.setChecked(True)
 
