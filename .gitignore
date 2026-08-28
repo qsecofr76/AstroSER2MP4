@@ -10,6 +10,7 @@ __pycache__/
 
 # Temporary Astro files & test videos
 *.ser
+*.avi
 *.mp4
 *.gif
 *.png

@@ -4,7 +4,7 @@ from PyQt6.QtCore import QThread, pyqtSignal
 import cv2
 import numpy as np
 from PIL import Image
-from ser_parser import SERParser
+from ser_parser import SERParser, open_ser_or_video_file
 from image_utils import apply_hsl_colorization, apply_logo_overlay, load_title_image, embed_audio_into_video
 
 class ConverterWorker(QThread):
@@ -86,12 +86,10 @@ class ConverterWorker(QThread):
         parser = None
         writer = None
         try:
-            self.status_changed.emit("Apertura del file SER in corso...")
-            parser = SERParser(self.ser_path)
+            self.status_changed.emit("Apertura del file sorgente in corso...")
+            parser = open_ser_or_video_file(self.ser_path)
             header = parser.header
-            
-            w = header.image_width
-            h = header.image_height
+
             total_ser_frames = header.frame_count
 
             start_idx = max(0, self.start_frame - 1)
@@ -104,6 +102,10 @@ class ConverterWorker(QThread):
                 start_idx, end_idx = 0, total_ser_frames - 1
 
             num_ser_selected = end_idx - start_idx + 1
+
+            # Fetch sample frame to get exact frame dimensions for VideoWriter
+            sample_frame = parser.get_frame(start_idx, auto_stretch=self.auto_stretch)
+            h, w = sample_frame.shape[0], sample_frame.shape[1]
 
             # Intro and Outro setup
             num_intro_frames = int(round(self.intro_duration * self.output_fps)) if (self.intro_enabled and self.intro_path) else 0
@@ -132,7 +134,8 @@ class ConverterWorker(QThread):
                 codecs_to_try = [
                     ('avc1', "H.264 (avc1)"),
                     ('H264', "H.264 (H264)"),
-                    ('mp4v', "MPEG-4 (mp4v)")
+                    ('mp4v', "MPEG-4 (mp4v)"),
+                    ('MJPG', "Motion JPEG (MJPG)")
                 ]
 
                 writer = None
@@ -192,7 +195,7 @@ class ConverterWorker(QThread):
                     pct = int((current_processed_count / total_output_frames) * 100)
                     self.progress_changed.emit(pct)
 
-            # 2. Render Main SER frames (within trim range)
+            # 2. Render Main video frames (within trim range)
             for idx in range(start_idx, end_idx + 1):
                 if self._is_cancelled:
                     raise InterruptedError("Conversione annullata dall'utente.")
@@ -206,6 +209,10 @@ class ConverterWorker(QThread):
                     color_mode_override=self.color_mode_override,
                     debayer_algorithm=self.debayer_algorithm
                 )
+
+                # Ensure frame size matches writer exactly
+                if frame.shape[1] != w or frame.shape[0] != h:
+                    frame = cv2.resize(frame, (w, h), interpolation=cv2.INTER_AREA)
 
                 # Post-processing: HSL Colorization
                 if self.hsl_enabled:

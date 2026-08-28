@@ -1,6 +1,7 @@
 import os
 import sys
 import cv2
+import traceback
 import numpy as np
 from typing import Optional
 from PyQt6.QtWidgets import (
@@ -12,9 +13,11 @@ from PyQt6.QtWidgets import (
 from PyQt6.QtCore import Qt, pyqtSignal
 from PyQt6.QtGui import QImage, QPixmap, QIcon, QPainter, QPen, QColor
 
-from ser_parser import SERParser
+from ser_parser import SERParser, open_ser_or_video_file
 from converter_worker import ConverterWorker
 from image_utils import apply_hsl_colorization, apply_logo_overlay
+
+SUPPORTED_EXTS = ('.ser', '.avi', '.mp4', '.mov', '.mkv', '.webm', '.m4v')
 
 class BookmarkSlider(QSlider):
     def __init__(self, orientation, parent=None):
@@ -77,7 +80,8 @@ class DropFrame(QFrame):
     def dragEnterEvent(self, event):
         if event.mimeData().hasUrls():
             for url in event.mimeData().urls():
-                if url.toLocalFile().lower().endswith('.ser'):
+                fn = url.toLocalFile().lower()
+                if fn.endswith(SUPPORTED_EXTS):
                     event.acceptProposedAction()
                     self.setStyleSheet("border: 2px dashed #4fd1c5; background-color: #1e2837;")
                     return
@@ -90,7 +94,7 @@ class DropFrame(QFrame):
         self.setStyleSheet("")
         for url in event.mimeData().urls():
             file_path = url.toLocalFile()
-            if file_path.lower().endswith('.ser'):
+            if file_path.lower().endswith(SUPPORTED_EXTS):
                 self.file_dropped.emit(file_path)
                 event.acceptProposedAction()
                 return
@@ -102,7 +106,7 @@ class DropFrame(QFrame):
 class MainWindow(QMainWindow):
     def __init__(self):
         super().__init__()
-        self.setWindowTitle("AstroSER to MP4 Converter")
+        self.setWindowTitle("AstroSER & Video Converter")
         self.resize(1150, 920)
         self.setMinimumSize(980, 780)
         
@@ -123,7 +127,7 @@ class MainWindow(QMainWindow):
         main_layout.setSpacing(10)
 
         # 1. Header Title
-        title_label = QLabel("AstroSER to MP4 Converter")
+        title_label = QLabel("AstroSER & Video Converter")
         title_label.setObjectName("app-title")
         title_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
         main_layout.addWidget(title_label)
@@ -139,7 +143,7 @@ class MainWindow(QMainWindow):
         self.lbl_drop_icon.setObjectName("drop-icon")
         drop_layout.addWidget(self.lbl_drop_icon)
 
-        self.lbl_drop_text = QLabel("Trascina qui il file .SER o fai clic per sfogliare")
+        self.lbl_drop_text = QLabel("Trascina qui il file video (.SER, .AVI, .MP4) o fai clic per sfogliare")
         self.lbl_drop_text.setObjectName("drop-text")
         drop_layout.addWidget(self.lbl_drop_text)
 
@@ -163,7 +167,7 @@ class MainWindow(QMainWindow):
         tab_img_layout.setSpacing(10)
 
         # Metadati Group
-        self.grp_meta = QGroupBox("Metadati File SER")
+        self.grp_meta = QGroupBox("Metadati File Video")
         meta_grid = QGridLayout(self.grp_meta)
         meta_grid.setSpacing(6)
         meta_grid.setContentsMargins(12, 18, 12, 12)
@@ -574,7 +578,7 @@ class MainWindow(QMainWindow):
         preview_layout.setSpacing(10)
         preview_layout.setContentsMargins(12, 18, 12, 12)
 
-        self.lbl_preview_img = QLabel("Carica un file .SER per visualizzare l'anteprima")
+        self.lbl_preview_img = QLabel("Carica un file video (.SER, .AVI, .MP4) per visualizzare l'anteprima")
         self.lbl_preview_img.setObjectName("preview-img-label")
         self.lbl_preview_img.setAlignment(Qt.AlignmentFlag.AlignCenter)
         self.lbl_preview_img.setMinimumSize(400, 320)
@@ -861,10 +865,21 @@ class MainWindow(QMainWindow):
 
     def browse_ser_file(self):
         file_path, _ = QFileDialog.getOpenFileName(
-            self, "Seleziona File SER", "", "Astro SER Files (*.ser)"
+            self, "Seleziona File Video o SER", "",
+            "Tutti i Video Supportati (*.ser *.avi *.mp4 *.mov *.mkv *.webm *.m4v);;File SER (*.ser);;File AVI (*.avi);;File MP4 (*.mp4);;Tutti i File (*.*)"
         )
         if file_path:
             self.load_ser_file(file_path)
+
+    def show_error_dialog(self, title: str, summary: str, details: str):
+        msg_box = QMessageBox(self)
+        msg_box.setIcon(QMessageBox.Icon.Critical)
+        msg_box.setWindowTitle(title)
+        msg_box.setText(summary)
+        msg_box.setInformativeText(details)
+        msg_box.setStandardButtons(QMessageBox.StandardButton.Ok)
+        msg_box.setMinimumWidth(550)
+        msg_box.exec()
 
     def load_ser_file(self, file_path: str):
         try:
@@ -872,7 +887,7 @@ class MainWindow(QMainWindow):
             if self.parser:
                 self.parser.close()
             
-            self.parser = SERParser(file_path)
+            self.parser = open_ser_or_video_file(file_path)
             self.current_ser_path = file_path
             header = self.parser.header
 
@@ -884,7 +899,13 @@ class MainWindow(QMainWindow):
             self.num_fps.setValue(self.original_fps)
             self.cmb_mult.setCurrentIndex(6) # 1.0x
 
-            is_already_debayered = header.color_id >= 100 or self.parser._channels == 3
+            # Reset pattern combobox to Auto (Index 0) to trigger automatic optimal Bayer phase detection
+            self.cmb_pattern.blockSignals(True)
+            self.cmb_pattern.setCurrentIndex(0)
+            self.cmb_pattern.blockSignals(False)
+
+            is_ser = self.parser and hasattr(self.parser.header, 'file_id') and self.parser.header.file_id.startswith("LUCAM-RECORDER")
+            is_already_debayered = is_ser and (header.color_id >= 100 or self.parser._channels == 3)
             if is_already_debayered:
                 if header.color_id == 100:
                     color_str = "RGB Colore (Già Debayerizzato)"
@@ -892,6 +913,8 @@ class MainWindow(QMainWindow):
                     color_str = "BGR Colore (Già Debayerizzato)"
                 else:
                     color_str = "RGB Colore (3 Canali - Già Debayerizzato)"
+            elif not is_ser:
+                color_str = f"Stream Video ({header.file_id})"
             else:
                 color_names = {
                     0: "Monocromatico",
@@ -952,10 +975,15 @@ class MainWindow(QMainWindow):
 
             self.update_debayer_algo_state()
             self.on_preview_slider_changed(0)
-            self.lbl_status.setText("File SER caricato con successo.")
+            self.lbl_status.setText("File video caricato con successo.")
 
         except Exception as e:
-            QMessageBox.critical(self, "Errore Caricamento", f"Impossibile aprire il file SER:\n{str(e)}")
+            traceback.print_exc()
+            self.show_error_dialog(
+                "Errore Caricamento File",
+                f"Impossibile aprire il file video:\n{os.path.basename(file_path)}",
+                str(e)
+            )
             self.lbl_status.setText("Errore durante il caricamento.")
 
     def get_current_bayer_mode(self) -> str:
@@ -970,7 +998,8 @@ class MainWindow(QMainWindow):
 
     def update_debayer_algo_state(self):
         mode = self.get_current_bayer_mode()
-        is_already_debayered = self.parser and (self.parser.header.color_id >= 100 or self.parser._channels == 3)
+        is_ser = self.parser and hasattr(self.parser.header, 'file_id') and self.parser.header.file_id.startswith("LUCAM-RECORDER")
+        is_already_debayered = is_ser and (self.parser.header.color_id >= 100 or self.parser._channels == 3)
         if mode in ["DISABLED", "MONO", "RGB", "RGB_PLANAR"] or (mode == "AUTO" and is_already_debayered):
             self.cmb_algo.setEnabled(False)
         else:
@@ -1034,7 +1063,6 @@ class MainWindow(QMainWindow):
             else:
                 self.lbl_frame_time.setText("Timestamp: Non disponibile")
         except Exception as e:
-            import traceback
             traceback.print_exc()
             self.lbl_status.setText(f"Errore anteprima: {str(e)}")
 
@@ -1275,7 +1303,7 @@ class MainWindow(QMainWindow):
             return
 
         if not self.current_ser_path:
-            QMessageBox.warning(self, "Nessun File", "Seleziona prima un file .SER di input.")
+            QMessageBox.warning(self, "Nessun File", "Seleziona prima un file video (.SER, .AVI, .MP4) di input.")
             return
 
         out_path = self.txt_output_path.text().strip()
@@ -1368,7 +1396,7 @@ class MainWindow(QMainWindow):
             if "annullata" in msg.lower():
                 QMessageBox.warning(self, "Annullato", msg)
             else:
-                QMessageBox.critical(self, "Errore", msg)
+                self.show_error_dialog("Errore durante l'Esportazione", "Operazione non completata:", msg)
 
     def closeEvent(self, event):
         if self.worker and self.worker.isRunning():
