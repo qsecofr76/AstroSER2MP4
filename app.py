@@ -10,14 +10,139 @@ from PyQt6.QtWidgets import (
     QDoubleSpinBox, QSpinBox, QFileDialog, QGroupBox, QProgressBar, QComboBox,
     QMessageBox, QLineEdit, QScrollArea, QTabWidget, QStyleOptionSlider, QStyle
 )
-from PyQt6.QtCore import Qt, pyqtSignal
+from PyQt6.QtCore import Qt, pyqtSignal, QPoint
 from PyQt6.QtGui import QImage, QPixmap, QIcon, QPainter, QPen, QColor
 
 from ser_parser import SERParser, open_ser_or_video_file
 from converter_worker import ConverterWorker
-from image_utils import apply_hsl_colorization, apply_logo_overlay
+from image_utils import apply_denoise, apply_hsl_colorization, apply_logo_overlay
 
 SUPPORTED_EXTS = ('.ser', '.avi', '.mp4', '.mov', '.mkv', '.webm', '.m4v')
+
+class InteractivePreviewLabel(QLabel):
+    """
+    Interactive Preview Label with smooth Zoom In / Out, 1:1 Pixel Mapping,
+    Mouse Drag Panning, and Mouse Wheel Zooming.
+    """
+    zoom_changed = pyqtSignal(float)
+
+    def __init__(self, text="", parent=None):
+        super().__init__(text, parent)
+        self.setMouseTracking(True)
+        self.zoom_factor = 1.0
+        self.pan_x = 0.5
+        self.pan_y = 0.5
+        self._dragging = False
+        self._last_mouse_pos = QPoint()
+        self._current_frame_bgr = None
+        self.setCursor(Qt.CursorShape.ArrowCursor)
+
+    def set_frame(self, frame_bgr: Optional[np.ndarray]):
+        self._current_frame_bgr = frame_bgr
+        self.update_view()
+
+    def zoom_in(self):
+        self.set_zoom(self.zoom_factor * 1.5)
+
+    def zoom_out(self):
+        self.set_zoom(self.zoom_factor / 1.5)
+
+    def reset_zoom(self):
+        self.zoom_factor = 1.0
+        self.pan_x = 0.5
+        self.pan_y = 0.5
+        self.setCursor(Qt.CursorShape.ArrowCursor)
+        self.zoom_changed.emit(self.zoom_factor)
+        self.update_view()
+
+    def zoom_100(self):
+        if self._current_frame_bgr is not None:
+            img_w = self._current_frame_bgr.shape[1]
+            view_w = max(100, self.width())
+            scale_100 = max(1.0, img_w / float(view_w))
+            self.set_zoom(scale_100)
+        else:
+            self.set_zoom(2.5)
+
+    def set_zoom(self, new_zoom: float):
+        self.zoom_factor = max(1.0, min(25.0, new_zoom))
+        if self.zoom_factor <= 1.02:
+            self.zoom_factor = 1.0
+            self.pan_x = 0.5
+            self.pan_y = 0.5
+            self.setCursor(Qt.CursorShape.ArrowCursor)
+        else:
+            self.setCursor(Qt.CursorShape.OpenHandCursor)
+        self.zoom_changed.emit(self.zoom_factor)
+        self.update_view()
+
+    def mousePressEvent(self, event):
+        if event.button() == Qt.MouseButton.LeftButton and self.zoom_factor > 1.0:
+            self._dragging = True
+            self._last_mouse_pos = event.pos()
+            self.setCursor(Qt.CursorShape.ClosedHandCursor)
+        super().mousePressEvent(event)
+
+    def mouseMoveEvent(self, event):
+        if self._dragging and self.zoom_factor > 1.0 and self._current_frame_bgr is not None:
+            delta = event.pos() - self._last_mouse_pos
+            self._last_mouse_pos = event.pos()
+            
+            dx = delta.x() / float(max(10, self.width())) / self.zoom_factor
+            dy = delta.y() / float(max(10, self.height())) / self.zoom_factor
+            
+            self.pan_x = max(0.0, min(1.0, self.pan_x - dx))
+            self.pan_y = max(0.0, min(1.0, self.pan_y - dy))
+            self.update_view()
+        super().mouseMoveEvent(event)
+
+    def mouseReleaseEvent(self, event):
+        if event.button() == Qt.MouseButton.LeftButton:
+            self._dragging = False
+            if self.zoom_factor > 1.0:
+                self.setCursor(Qt.CursorShape.OpenHandCursor)
+            else:
+                self.setCursor(Qt.CursorShape.ArrowCursor)
+        super().mouseReleaseEvent(event)
+
+    def wheelEvent(self, event):
+        if self._current_frame_bgr is not None:
+            delta = event.angleDelta().y()
+            if delta > 0:
+                self.zoom_in()
+            elif delta < 0:
+                self.zoom_out()
+            event.accept()
+        else:
+            super().wheelEvent(event)
+
+    def update_view(self):
+        if self._current_frame_bgr is None:
+            return
+        h, w, c = self._current_frame_bgr.shape
+        if self.zoom_factor <= 1.02:
+            display_img = self._current_frame_bgr
+        else:
+            crop_w = max(20, int(w / self.zoom_factor))
+            crop_h = max(20, int(h / self.zoom_factor))
+            
+            x1 = int(np.clip(self.pan_x * w - crop_w / 2.0, 0, w - crop_w))
+            y1 = int(np.clip(self.pan_y * h - crop_h / 2.0, 0, h - crop_h))
+            display_img = self._current_frame_bgr[y1:y1+crop_h, x1:x1+crop_w]
+
+        dh, dw, dc = display_img.shape
+        rgb = cv2.cvtColor(display_img, cv2.COLOR_BGR2RGB)
+        rgb = np.ascontiguousarray(rgb)
+        qimg = QImage(rgb.data, dw, dh, dc * dw, QImage.Format.Format_RGB888)
+        pix = QPixmap.fromImage(qimg)
+        
+        scaled = pix.scaled(
+            max(10, self.width() - 4),
+            max(10, self.height() - 4),
+            Qt.AspectRatioMode.KeepAspectRatio,
+            Qt.TransformationMode.SmoothTransformation
+        )
+        self.setPixmap(scaled)
 
 class BookmarkSlider(QSlider):
     def __init__(self, orientation, parent=None):
@@ -272,6 +397,44 @@ class MainWindow(QMainWindow):
         enh_layout.addWidget(self.sld_brightness)
 
         tab_img_layout.addWidget(self.grp_enh)
+
+        # Noise Reduction (Denoise) Group
+        self.grp_denoise = QGroupBox("Riduzione Rumore (Denoise)")
+        denoise_layout = QVBoxLayout(self.grp_denoise)
+        denoise_layout.setSpacing(8)
+        denoise_layout.setContentsMargins(12, 18, 12, 12)
+
+        self.chk_denoise = QCheckBox("Abilita Riduzione Rumore (Denoise)")
+        self.chk_denoise.setChecked(False)
+        self.chk_denoise.stateChanged.connect(self.refresh_preview)
+        denoise_layout.addWidget(self.chk_denoise)
+
+        method_hbox = QHBoxLayout()
+        lbl_dmethod = QLabel("Algoritmo Denoise:")
+        lbl_dmethod.setMinimumWidth(160)
+        method_hbox.addWidget(lbl_dmethod)
+
+        self.cmb_denoise_method = QComboBox()
+        self.cmb_denoise_method.addItems([
+            "Bilateral Edge-Aware (Consigliato)",
+            "Non-Local Means (Alta Qualità)",
+            "Solo Crominanza (Rimuove Macchie Colore)",
+            "Filtro Mediano (Anti Hot-Pixel)"
+        ])
+        self.cmb_denoise_method.currentIndexChanged.connect(self.refresh_preview)
+        method_hbox.addWidget(self.cmb_denoise_method, stretch=1)
+        denoise_layout.addLayout(method_hbox)
+
+        self.lbl_denoise_strength = QLabel("Intensità Riduzione Rumore (7):")
+        denoise_layout.addWidget(self.lbl_denoise_strength)
+
+        self.sld_denoise_strength = QSlider(Qt.Orientation.Horizontal)
+        self.sld_denoise_strength.setRange(1, 25)
+        self.sld_denoise_strength.setValue(7)
+        self.sld_denoise_strength.valueChanged.connect(self.on_denoise_strength_changed)
+        denoise_layout.addWidget(self.sld_denoise_strength)
+
+        tab_img_layout.addWidget(self.grp_denoise)
         tab_img_layout.addStretch(1)
         self.tabs.addTab(tab_img, "📷 Immagine & Colore")
 
@@ -575,13 +738,45 @@ class MainWindow(QMainWindow):
         # Right Column - Preview Area
         self.grp_preview = QGroupBox("Anteprima Fotogramma")
         preview_layout = QVBoxLayout(self.grp_preview)
-        preview_layout.setSpacing(10)
+        preview_layout.setSpacing(8)
         preview_layout.setContentsMargins(12, 18, 12, 12)
 
-        self.lbl_preview_img = QLabel("Carica un file video (.SER, .AVI, .MP4) per visualizzare l'anteprima")
+        # Zoom & Pan Toolbar
+        zoom_toolbar = QHBoxLayout()
+        zoom_toolbar.setSpacing(6)
+
+        self.btn_zoom_in = QPushButton("🔍+ Zoom In")
+        self.btn_zoom_in.setToolTip("Aumenta ingrandimento (oppure usa la rotella del mouse sull'immagine)")
+        self.btn_zoom_in.clicked.connect(lambda: self.lbl_preview_img.zoom_in())
+
+        self.btn_zoom_out = QPushButton("🔍- Zoom Out")
+        self.btn_zoom_out.setToolTip("Riduci ingrandimento (oppure usa la rotella del mouse)")
+        self.btn_zoom_out.clicked.connect(lambda: self.lbl_preview_img.zoom_out())
+
+        self.btn_zoom_100 = QPushButton("1:1 Pixel Reali")
+        self.btn_zoom_100.setToolTip("Visualizza alla risoluzione reale 1:1 dei pixel del sensore (ideale per valutare il denoise)")
+        self.btn_zoom_100.clicked.connect(lambda: self.lbl_preview_img.zoom_100())
+
+        self.btn_zoom_fit = QPushButton("↔️ Adatta")
+        self.btn_zoom_fit.setToolTip("Adatta l'immagine intera alla finestra")
+        self.btn_zoom_fit.clicked.connect(lambda: self.lbl_preview_img.reset_zoom())
+
+        self.lbl_zoom_level = QLabel("Zoom: 1.0x (Adatta)")
+        self.lbl_zoom_level.setObjectName("timestamp-label")
+
+        zoom_toolbar.addWidget(self.btn_zoom_in)
+        zoom_toolbar.addWidget(self.btn_zoom_out)
+        zoom_toolbar.addWidget(self.btn_zoom_100)
+        zoom_toolbar.addWidget(self.btn_zoom_fit)
+        zoom_toolbar.addStretch(1)
+        zoom_toolbar.addWidget(self.lbl_zoom_level)
+        preview_layout.addLayout(zoom_toolbar)
+
+        self.lbl_preview_img = InteractivePreviewLabel("Carica un file video (.SER, .AVI, .MP4) per visualizzare l'anteprima")
         self.lbl_preview_img.setObjectName("preview-img-label")
         self.lbl_preview_img.setAlignment(Qt.AlignmentFlag.AlignCenter)
         self.lbl_preview_img.setMinimumSize(400, 320)
+        self.lbl_preview_img.zoom_changed.connect(self.on_zoom_changed)
         preview_layout.addWidget(self.lbl_preview_img, stretch=1)
 
         slider_hbox = QHBoxLayout()
@@ -922,10 +1117,14 @@ class MainWindow(QMainWindow):
                     2: "Bayer GRBG",
                     3: "Bayer GBRG",
                     4: "Bayer BGGR",
-                    8: "Bayer CYYM",
-                    9: "Bayer YCMY",
-                    16: "Bayer YMCY",
-                    17: "Bayer MYYC"
+                    8: "Bayer RGGB",
+                    9: "Bayer GRBG",
+                    10: "Bayer GBRG",
+                    11: "Bayer BGGR",
+                    16: "Bayer CYYM",
+                    17: "Bayer YCMY",
+                    18: "Bayer YMCY",
+                    19: "Bayer MYYC"
                 }
                 color_str = color_names.get(header.color_id, f"Sconosciuto ({header.color_id})")
 
@@ -1033,6 +1232,15 @@ class MainWindow(QMainWindow):
                 debayer_algorithm=debayer_algo
             )
 
+            # Apply Denoise in Live Preview
+            if self.chk_denoise.isChecked():
+                frame_bgr = apply_denoise(
+                    frame_bgr,
+                    enabled=True,
+                    method=self.cmb_denoise_method.currentText(),
+                    strength=self.sld_denoise_strength.value()
+                )
+
             # Apply HSL Colorization in Live Preview
             if self.chk_hsl_enable.isChecked():
                 frame_bgr = apply_hsl_colorization(
@@ -1069,6 +1277,10 @@ class MainWindow(QMainWindow):
     def refresh_preview(self):
         if self.parser:
             self.on_preview_slider_changed(self.sld_preview.value())
+
+    def on_denoise_strength_changed(self, val: int):
+        self.lbl_denoise_strength.setText(f"Intensità Riduzione Rumore ({val}):")
+        self.refresh_preview()
 
     def on_gamma_changed(self, val: int):
         gamma_val = val / 100.0
@@ -1263,22 +1475,13 @@ class MainWindow(QMainWindow):
             self.txt_output_path.setText(base + ext)
 
     def display_preview(self, frame_bgr):
-        h, w, c = frame_bgr.shape
-        bytes_per_line = c * w
-        
-        frame_rgb = cv2.cvtColor(frame_bgr, cv2.COLOR_BGR2RGB)
-        frame_rgb = np.ascontiguousarray(frame_rgb)
-        
-        q_img = QImage(frame_rgb.data, w, h, bytes_per_line, QImage.Format.Format_RGB888)
-        pixmap = QPixmap.fromImage(q_img)
-        
-        scaled_pixmap = pixmap.scaled(
-            self.lbl_preview_img.width() - 4,
-            self.lbl_preview_img.height() - 4,
-            Qt.AspectRatioMode.KeepAspectRatio,
-            Qt.TransformationMode.SmoothTransformation
-        )
-        self.lbl_preview_img.setPixmap(scaled_pixmap)
+        self.lbl_preview_img.set_frame(frame_bgr)
+
+    def on_zoom_changed(self, zoom: float):
+        if zoom <= 1.02:
+            self.lbl_zoom_level.setText("Zoom: 1.0x (Adatta)")
+        else:
+            self.lbl_zoom_level.setText(f"Zoom: {zoom:.1f}x ({int(zoom*100)}%) - Trascina col mouse")
 
     def browse_output_path(self):
         if not self.current_ser_path:
@@ -1347,6 +1550,9 @@ class MainWindow(QMainWindow):
             quality=quality,
             start_frame=start_f,
             end_frame=end_f,
+            denoise_enabled=self.chk_denoise.isChecked(),
+            denoise_method=self.cmb_denoise_method.currentText(),
+            denoise_strength=self.sld_denoise_strength.value(),
             hsl_enabled=self.chk_hsl_enable.isChecked(),
             hsl_preset=self.cmb_hsl_preset.currentText(),
             hsl_hue=self.sld_hsl_hue.value(),

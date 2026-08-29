@@ -203,19 +203,33 @@ class SERParser:
         else:
             gray = img.reshape((h, w))
             
+            ea = debayer_algorithm == "EA"
+            vng = debayer_algorithm == "VNG"
+            code_rggb = cv2.COLOR_BayerRG2BGR_EA if ea else (cv2.COLOR_BayerRG2BGR_VNG if vng else cv2.COLOR_BayerRG2BGR)
+            code_grbg = cv2.COLOR_BayerGR2BGR_EA if ea else (cv2.COLOR_BayerGR2BGR_VNG if vng else cv2.COLOR_BayerGR2BGR)
+            code_gbrg = cv2.COLOR_BayerGB2BGR_EA if ea else (cv2.COLOR_BayerGB2BGR_VNG if vng else cv2.COLOR_BayerGB2BGR)
+            code_bggr = cv2.COLOR_BayerBG2BGR_EA if ea else (cv2.COLOR_BayerBG2BGR_VNG if vng else cv2.COLOR_BayerBG2BGR)
+
             bayer_codes = {
-                1: cv2.COLOR_BayerRG2BGR_EA if debayer_algorithm == "EA" else (cv2.COLOR_BayerRG2BGR_VNG if debayer_algorithm == "VNG" else cv2.COLOR_BayerRG2BGR),
-                2: cv2.COLOR_BayerGR2BGR_EA if debayer_algorithm == "EA" else (cv2.COLOR_BayerGR2BGR_VNG if debayer_algorithm == "VNG" else cv2.COLOR_BayerGR2BGR),
-                3: cv2.COLOR_BayerGB2BGR_EA if debayer_algorithm == "EA" else (cv2.COLOR_BayerGB2BGR_VNG if debayer_algorithm == "VNG" else cv2.COLOR_BayerGB2BGR),
-                4: cv2.COLOR_BayerBG2BGR_EA if debayer_algorithm == "EA" else (cv2.COLOR_BayerBG2BGR_VNG if debayer_algorithm == "VNG" else cv2.COLOR_BayerBG2BGR),
+                # Manual overrides (standard OpenCV names):
+                1: code_rggb,
+                2: code_grbg,
+                3: code_gbrg,
+                4: code_bggr,
+                # SER Header IDs (astronomy sensor origin -> OpenCV mapping):
+                8: code_bggr,  # SER ColorID 8 (Bayer RGGB in SER header)
+                9: code_gbrg,  # SER ColorID 9 (Bayer GRBG in SER header)
+                10: code_grbg, # SER ColorID 10 (Bayer GBRG in SER header)
+                11: code_rggb, # SER ColorID 11 (Bayer BGGR in SER header)
             }
 
-            if color_mode_override == "MONO" or cid == 0:
-                active_cid = cid if cid in bayer_codes else 1
+            if color_mode_override == "MONO":
+                # If explicitly forced to Mono from a Bayer source, debayer first to eliminate Bayer grid artifacts
+                active_cid = cid if cid in bayer_codes else 8
                 bgr_deb = cv2.cvtColor(gray, bayer_codes[active_cid])
                 gray_clean = cv2.cvtColor(bgr_deb, cv2.COLOR_BGR2GRAY)
                 bgr_raw = cv2.cvtColor(gray_clean, cv2.COLOR_GRAY2BGR)
-            elif disable_debayer or color_mode_override in ["DISABLED", "NONE"]:
+            elif cid == 0 or disable_debayer or color_mode_override in ["DISABLED", "NONE"]:
                 bgr_raw = cv2.cvtColor(gray, cv2.COLOR_GRAY2BGR)
             else:
                 if cid in bayer_codes:

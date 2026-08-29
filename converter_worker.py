@@ -1,11 +1,119 @@
 import os
+import subprocess
 from typing import Optional
 from PyQt6.QtCore import QThread, pyqtSignal
 import cv2
 import numpy as np
 from PIL import Image
+import imageio_ffmpeg
 from ser_parser import SERParser, open_ser_or_video_file
-from image_utils import apply_hsl_colorization, apply_logo_overlay, load_title_image, embed_audio_into_video
+from image_utils import apply_denoise, apply_hsl_colorization, apply_logo_overlay, load_title_image, embed_audio_into_video
+
+class FFmpegVideoWriter:
+    """
+    Video writer using FFmpeg with native libx264 (H.264 / yuv420p) via subprocess pipe.
+    Eliminates OpenCV OpenH264 DLL missing errors and provides pristine compression & compatibility.
+    Falls back gracefully to OpenCV VideoWriter if FFmpeg is unavailable.
+    """
+    def __init__(self, output_path: str, width: int, height: int, fps: float, quality: int = 95):
+        self.output_path = output_path
+        # libx264 yuv420p requires even width and height
+        self.enc_w = width if (width % 2 == 0) else (width - 1)
+        self.enc_h = height if (height % 2 == 0) else (height - 1)
+        self.fps = fps
+        self.quality = quality
+        self.process = None
+        self._cv2_writer = None
+        self.codec_name = ""
+
+        # Map quality (1-100) to CRF (36 to 12). Default 95 quality -> CRF 13-14 (near-visually lossless)
+        crf = int(np.clip(round(36 - (self.quality / 100.0) * 24), 12, 36))
+
+        try:
+            ffmpeg_exe = imageio_ffmpeg.get_ffmpeg_exe()
+            if ffmpeg_exe and os.path.exists(ffmpeg_exe):
+                cmd = [
+                    ffmpeg_exe, "-y",
+                    "-f", "rawvideo",
+                    "-vcodec", "rawvideo",
+                    "-s", f"{self.enc_w}x{self.enc_h}",
+                    "-pix_fmt", "bgr24",
+                    "-r", str(fps),
+                    "-i", "-",
+                    "-c:v", "libx264",
+                    "-pix_fmt", "yuv420p",
+                    "-crf", str(crf),
+                    "-preset", "medium",
+                    "-g", "1",
+                    "-bf", "0",
+                    "-tune", "fastdecode",
+                    "-movflags", "+faststart",
+                    output_path
+                ]
+                self.process = subprocess.Popen(
+                    cmd,
+                    stdin=subprocess.PIPE,
+                    stdout=subprocess.DEVNULL,
+                    stderr=subprocess.PIPE
+                )
+                self.codec_name = f"H.264 (FFmpeg libx264, CRF {crf})"
+        except Exception:
+            self.process = None
+
+        if self.process is None:
+            # Fallback to OpenCV VideoWriter
+            fourcc = cv2.VideoWriter_fourcc(*'mp4v')
+            self._cv2_writer = cv2.VideoWriter(output_path, fourcc, fps, (self.enc_w, self.enc_h))
+            if not self._cv2_writer.isOpened():
+                fourcc = cv2.VideoWriter_fourcc(*'MJPG')
+                self._cv2_writer = cv2.VideoWriter(output_path, fourcc, fps, (self.enc_w, self.enc_h))
+                self.codec_name = "Motion-JPEG (OpenCV MJPG)"
+            else:
+                self.codec_name = "MPEG-4 (OpenCV mp4v)"
+
+    def is_opened(self) -> bool:
+        if self.process is not None:
+            return self.process.poll() is None
+        if self._cv2_writer is not None:
+            return self._cv2_writer.isOpened()
+        return False
+
+    def write(self, frame_bgr: np.ndarray):
+        if frame_bgr.shape[1] != self.enc_w or frame_bgr.shape[0] != self.enc_h:
+            frame_bgr = cv2.resize(frame_bgr, (self.enc_w, self.enc_h), interpolation=cv2.INTER_AREA)
+
+        if self.process is not None:
+            if self.process.poll() is not None:
+                _, stderr = self.process.communicate()
+                err_msg = stderr.decode('utf-8', errors='ignore') if stderr else 'Processo FFmpeg terminato inaspettatamente.'
+                raise RuntimeError(f"Errore codifica video FFmpeg: {err_msg}")
+            self.process.stdin.write(frame_bgr.tobytes())
+        elif self._cv2_writer is not None:
+            self._cv2_writer.write(frame_bgr)
+
+    def release(self):
+        if self.process is not None:
+            try:
+                if self.process.stdin:
+                    try:
+                        self.process.stdin.close()
+                    except Exception:
+                        pass
+                # Drain buffers and wait cleanly for moov atom and index finalization
+                stdout, stderr = self.process.communicate(timeout=30)
+                if self.process.returncode != 0:
+                    err_msg = stderr.decode('utf-8', errors='ignore') if stderr else f"Exit code {self.process.returncode}"
+                    print(f"FFmpeg exit status: {err_msg}")
+            except Exception as e:
+                print(f"Error during FFmpeg release: {e}")
+                try:
+                    self.process.kill()
+                except Exception:
+                    pass
+            self.process = None
+        if self._cv2_writer is not None:
+            self._cv2_writer.release()
+            self._cv2_writer = None
 
 class ConverterWorker(QThread):
     progress_changed = pyqtSignal(int)
@@ -20,6 +128,9 @@ class ConverterWorker(QThread):
                  quality: int = 95,
                  start_frame: int = 1,
                  end_frame: Optional[int] = None,
+                 denoise_enabled: bool = False,
+                 denoise_method: str = "Bilateral Edge-Aware (Consigliato)",
+                 denoise_strength: int = 7,
                  hsl_enabled: bool = False,
                  hsl_preset: str = "Nessuno (Originale)",
                  hsl_hue: int = 0,
@@ -54,6 +165,10 @@ class ConverterWorker(QThread):
         self.start_frame = start_frame
         self.end_frame = end_frame
         
+        self.denoise_enabled = denoise_enabled
+        self.denoise_method = denoise_method
+        self.denoise_strength = denoise_strength
+
         self.hsl_enabled = hsl_enabled
         self.hsl_preset = hsl_preset
         self.hsl_hue = hsl_hue
@@ -131,51 +246,17 @@ class ConverterWorker(QThread):
                 gif_frames = []
             else:
                 self.status_changed.emit(f"Preparazione video MP4: {w}x{h}, {total_output_frames} fotogrammi...")
-                codecs_to_try = [
-                    ('avc1', "H.264 (avc1)"),
-                    ('H264', "H.264 (H264)"),
-                    ('mp4v', "MPEG-4 (mp4v)"),
-                    ('MJPG', "Motion JPEG (MJPG)")
-                ]
+                writer = FFmpegVideoWriter(
+                    output_path=self.mp4_path,
+                    width=w,
+                    height=h,
+                    fps=self.output_fps,
+                    quality=self.quality
+                )
+                if not writer.is_opened():
+                    raise RuntimeError("Impossibile inizializzare il writer video MP4.")
 
-                writer = None
-                chosen_codec_name = ""
-
-                for fourcc_str, codec_desc in codecs_to_try:
-                    if self._is_cancelled:
-                        raise InterruptedError("Conversione annullata dall'utente.")
-                    
-                    fourcc = cv2.VideoWriter_fourcc(*fourcc_str)
-                    try:
-                        test_writer = cv2.VideoWriter(
-                            self.mp4_path, 
-                            fourcc, 
-                            self.output_fps, 
-                            (w, h), 
-                            params=[cv2.VIDEOWRITER_PROP_QUALITY, self.quality]
-                        )
-                    except Exception:
-                        test_writer = cv2.VideoWriter(self.mp4_path, fourcc, self.output_fps, (w, h))
-
-                    if not test_writer.isOpened():
-                        test_writer.release()
-                        test_writer = cv2.VideoWriter(self.mp4_path, fourcc, self.output_fps, (w, h))
-
-                    if test_writer.isOpened():
-                        writer = test_writer
-                        chosen_codec_name = codec_desc
-                        break
-                    else:
-                        test_writer.release()
-                        if os.path.exists(self.mp4_path):
-                            try:
-                                os.remove(self.mp4_path)
-                            except Exception:
-                                pass
-
-                if writer is None:
-                    raise RuntimeError("Impossibile inizializzare alcun codec video compatibile su questa macchina.")
-
+                chosen_codec_name = writer.codec_name
                 self.status_changed.emit(f"Codificatore selezionato: {chosen_codec_name}. Avvio conversione...")
 
             current_processed_count = 0
@@ -213,6 +294,15 @@ class ConverterWorker(QThread):
                 # Ensure frame size matches writer exactly
                 if frame.shape[1] != w or frame.shape[0] != h:
                     frame = cv2.resize(frame, (w, h), interpolation=cv2.INTER_AREA)
+
+                # Post-processing: Noise Reduction (Denoise)
+                if self.denoise_enabled:
+                    frame = apply_denoise(
+                        frame,
+                        enabled=True,
+                        method=self.denoise_method,
+                        strength=self.denoise_strength
+                    )
 
                 # Post-processing: HSL Colorization
                 if self.hsl_enabled:

@@ -1,0 +1,6 @@
+﻿PyQt6>=6.4.0
+opencv-python>=4.7.0
+numpy>=1.22.0
+Pillow>=9.0.0
+imageio-ffmpeg>=0.4.8
+astropy>=5.0.0

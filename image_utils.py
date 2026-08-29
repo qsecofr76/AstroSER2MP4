@@ -129,6 +129,78 @@ def apply_hsl_colorization(
     bgr_gray = cv2.merge([gray, gray, gray])
     return cv2.LUT(bgr_gray, lut)
 
+def apply_denoise(
+    bgr_img: np.ndarray,
+    enabled: bool = False,
+    method: str = "Bilateral Edge-Aware (Consigliato)",
+    strength: int = 7
+) -> np.ndarray:
+    """
+    Applies noise reduction (denoise) to a BGR image frame.
+    
+    Methods:
+    - "Bilateral Edge-Aware (Consigliato)" / "Bilateral Edge-Aware": 
+      Edge-preserving luma filtering + chroma noise smoothing in YCrCb color space.
+    - "Non-Local Means (Alta Qualità)" / "Non-Local Means":
+      Full patch-based NLM color denoising.
+    - "Solo Crominanza (Rimuove Macchie Colore)" / "Solo Crominanza":
+      Removes color blotches in dark sky while preserving 100% luminance detail.
+    - "Filtro Mediano (Anti Hot-Pixel)" / "Filtro Mediano":
+      Median filter for salt-and-pepper and hot sensor pixels.
+    """
+    if not enabled or strength <= 0:
+        return bgr_img
+
+    strength = int(np.clip(strength, 1, 30))
+
+    if "Bilateral" in method or method == "Bilateral Edge-Aware":
+        ycrcb = cv2.cvtColor(bgr_img, cv2.COLOR_BGR2YCrCb)
+        y, cr, cb = cv2.split(ycrcb)
+        
+        sigma_luma = float(strength * 3.5)
+        d = 5 if strength <= 10 else 7
+        y_denoised = cv2.bilateralFilter(y, d=d, sigmaColor=sigma_luma, sigmaSpace=sigma_luma)
+        
+        ksize = max(3, (strength // 2) * 2 + 1)
+        sigma_chroma = max(1.0, strength / 3.0)
+        cr_denoised = cv2.GaussianBlur(cr, (ksize, ksize), sigma_chroma)
+        cb_denoised = cv2.GaussianBlur(cb, (ksize, ksize), sigma_chroma)
+        
+        merged = cv2.merge([y_denoised, cr_denoised, cb_denoised])
+        return cv2.cvtColor(merged, cv2.COLOR_YCrCb2BGR)
+
+    elif "Non-Local Means" in method or "NLM" in method:
+        h_lum = float(strength * 0.8)
+        h_chroma = float(strength * 1.0)
+        template_window = 5
+        search_window = 11
+        return cv2.fastNlMeansDenoisingColored(
+            bgr_img,
+            None,
+            h=h_lum,
+            hColor=h_chroma,
+            templateWindowSize=template_window,
+            searchWindowSize=search_window
+        )
+
+    elif "Crominanza" in method or "Chroma" in method:
+        ycrcb = cv2.cvtColor(bgr_img, cv2.COLOR_BGR2YCrCb)
+        y, cr, cb = cv2.split(ycrcb)
+        ksize = max(3, (strength // 2) * 2 + 1)
+        sigma_chroma = max(1.0, strength / 2.5)
+        cr_denoised = cv2.GaussianBlur(cr, (ksize, ksize), sigma_chroma)
+        cb_denoised = cv2.GaussianBlur(cb, (ksize, ksize), sigma_chroma)
+        merged = cv2.merge([y, cr_denoised, cb_denoised])
+        return cv2.cvtColor(merged, cv2.COLOR_YCrCb2BGR)
+
+    elif "Mediano" in method or "Median" in method:
+        ksize = 3 if strength <= 10 else 5
+        return cv2.medianBlur(bgr_img, ksize)
+
+    else:
+        sigma = float(strength * 4.0)
+        return cv2.bilateralFilter(bgr_img, d=5, sigmaColor=sigma, sigmaSpace=sigma)
+
 def apply_logo_overlay(
     bgr_img: np.ndarray,
     logo_path: Optional[str] = None,
